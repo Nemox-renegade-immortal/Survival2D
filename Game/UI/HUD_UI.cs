@@ -214,6 +214,9 @@ public sealed partial class Game
 
     private void DrawImGuiLootCrates(ImDrawListPtr draw)
     {
+        IntPtr crateTexture = TextureCache.GetOrLoad("Assets/obstacles/crate.png");
+        IntPtr damagedTexture = TextureCache.GetOrLoad("Assets/obstacles/crate_damaged.png");
+
         foreach (LootCrate crate in _lootCrates)
         {
             if (!IsVisible(crate.Position, crate.Radius + 20f))
@@ -225,14 +228,28 @@ public sealed partial class Game
             Vector2 min = p - new Vector2(crate.Radius, crate.Radius);
             Vector2 max = p + new Vector2(crate.Radius, crate.Radius);
             float flash = Math.Clamp(crate.HitFlash * 6f, 0f, 1f);
-            Color wood = Mix(Color.FromArgb(152, 100, 58), Color.FromArgb(235, 196, 158), flash * 0.35f);
-            Color trim = Mix(Color.FromArgb(84, 56, 30), Color.White, flash * 0.2f);
+            bool damaged = crate.Health <= Math.Max(1, crate.MaxHealth / 2);
+            IntPtr texture = damaged ? damagedTexture : crateTexture;
 
             draw.AddRectFilled(min + new Vector2(2f, 4f), max + new Vector2(2f, 4f), ToU32(Color.FromArgb(38, 0, 0, 0)), 4f);
-            draw.AddRectFilled(min, max, ToU32(wood), 4f);
-            draw.AddRect(min, max, ToU32(Color.FromArgb(220, trim)), 4f, ImDrawFlags.None, 1.4f);
-            draw.AddLine(new Vector2(min.X + 4f, p.Y), new Vector2(max.X - 4f, p.Y), ToU32(Color.FromArgb(180, 208, 170, 126)), 2f);
-            draw.AddLine(new Vector2(p.X, min.Y + 4f), new Vector2(p.X, max.Y - 4f), ToU32(Color.FromArgb(180, 208, 170, 126)), 2f);
+
+            if (texture != IntPtr.Zero)
+            {
+                Color tint = flash > 0f
+                    ? Mix(Color.White, Color.FromArgb(255, 255, 224, 192), flash * 0.55f)
+                    : Color.White;
+                draw.AddImage(texture, min, max, Vector2.Zero, Vector2.One, ToU32(tint));
+                draw.AddRect(min, max, ToU32(Color.FromArgb(120, 255, 255, 255)), 4f, ImDrawFlags.None, 1f);
+            }
+            else
+            {
+                Color wood = Mix(damaged ? Color.FromArgb(118, 82, 58) : Color.FromArgb(152, 100, 58), Color.FromArgb(235, 196, 158), flash * 0.35f);
+                Color trim = Mix(Color.FromArgb(84, 56, 30), Color.White, flash * 0.2f);
+                draw.AddRectFilled(min, max, ToU32(wood), 4f);
+                draw.AddRect(min, max, ToU32(Color.FromArgb(220, trim)), 4f, ImDrawFlags.None, 1.4f);
+                draw.AddLine(new Vector2(min.X + 4f, p.Y), new Vector2(max.X - 4f, p.Y), ToU32(Color.FromArgb(180, 208, 170, 126)), 2f);
+                draw.AddLine(new Vector2(p.X, min.Y + 4f), new Vector2(p.X, max.Y - 4f), ToU32(Color.FromArgb(180, 208, 170, 126)), 2f);
+            }
 
             if (crate.Health < crate.MaxHealth || Vector2.DistanceSquared(Player.Position, crate.Position) <= 170f * 170f)
             {

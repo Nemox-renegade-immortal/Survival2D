@@ -94,7 +94,7 @@ public sealed partial class Game
             LootCrate crate = _lootCrates[i];
             state.Crates.Add(new NetLootCrateState
             {
-                Id = i,
+                Id = crate.NetworkId > 0 ? crate.NetworkId : i + 1,
                 X = crate.Position.X,
                 Y = crate.Position.Y,
                 Radius = crate.Radius,

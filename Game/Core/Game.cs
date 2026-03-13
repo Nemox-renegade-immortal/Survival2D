@@ -48,6 +48,13 @@ public sealed partial class Game
         public int PickupSequence;
     }
 
+    private sealed class ClientCrateAudioState
+    {
+        public int Health;
+        public bool Destroyed;
+        public Vector2 Position;
+    }
+
     private bool _useFastUi = true;
     private float _smoothedRenderFps = 60f;
     private float _qualitySwitchCooldown;
@@ -65,6 +72,7 @@ public sealed partial class Game
     private readonly List<RemotePlayerView> _remotePlayers = new List<RemotePlayerView>();
     private readonly List<Zombie> _zombies = new List<Zombie>();
     private int _nextZombieNetworkId = 1;
+    private int _nextLootCrateNetworkId = 1;
     private readonly List<Bullet> _bullets = new List<Bullet>();
     private readonly List<Bullet> _clientPredictedBullets = new List<Bullet>();
     private readonly List<Grenade> _grenades = new List<Grenade>();
@@ -73,6 +81,7 @@ public sealed partial class Game
     private readonly List<Turret> _turrets = new List<Turret>();
     private readonly List<ScrapPile> _scrapPiles = new List<ScrapPile>();
     private readonly List<LootCrate> _lootCrates = new List<LootCrate>();
+    private readonly Dictionary<int, ClientCrateAudioState> _clientCrateAudioStates = new Dictionary<int, ClientCrateAudioState>();
     private readonly List<MenuButton> _menuButtons = new List<MenuButton>();
     private readonly SoundManager _sound = new SoundManager();
     private readonly NetworkManager _network = new NetworkManager();
@@ -777,6 +786,13 @@ public sealed partial class Game
         return id;
     }
 
+    private int AllocateLootCrateNetworkId()
+    {
+        int id = Math.Max(1, _nextLootCrateNetworkId);
+        _nextLootCrateNetworkId = id >= int.MaxValue - 1 ? 1 : id + 1;
+        return id;
+    }
+
     private Zombie CreateTrackedZombie(ZombieKind kind, Vector2 position, int wave)
     {
         Zombie zombie = Zombie.Create(kind, position, wave);
@@ -797,7 +813,9 @@ public sealed partial class Game
         _scrapPiles.Clear();
         _lootCrates.Clear();
         _remoteActionTrackers.Clear();
+        _clientCrateAudioStates.Clear();
         _nextZombieNetworkId = 1;
+        _nextLootCrateNetworkId = 1;
         _crateRespawnTimer = 10f;
         _screenShakeTimer = 0f;
         _screenShakePower = 0f;
@@ -855,16 +873,20 @@ public sealed partial class Game
             }
         }
 
-        foreach (LootCrate crate in _lootCrates)
+        foreach (LootCrate existingCrate in _lootCrates)
         {
-            float rr = crate.Radius + radius + 22f;
-            if (Vector2.DistanceSquared(crate.Position, position) < rr * rr)
+            float rr = existingCrate.Radius + radius + 22f;
+            if (Vector2.DistanceSquared(existingCrate.Position, position) < rr * rr)
             {
                 return false;
             }
         }
 
-        _lootCrates.Add(new LootCrate(position, health, radius));
+        LootCrate newCrate = new LootCrate(position, health, radius)
+        {
+            NetworkId = AllocateLootCrateNetworkId()
+        };
+        _lootCrates.Add(newCrate);
         return true;
     }
 
@@ -881,6 +903,47 @@ public sealed partial class Game
         }
     }
 
+    private void SyncClientLootCrateAudio(NetWorldState world)
+    {
+        if (_network.Mode != NetMode.Client || _players.Count == 0)
+        {
+            return;
+        }
+
+        Vector2 listener = Player.Position;
+        Dictionary<int, ClientCrateAudioState> next = new Dictionary<int, ClientCrateAudioState>(world.Crates.Count);
+
+        foreach (NetLootCrateState state in world.Crates)
+        {
+            int crateId = Math.Max(1, state.Id);
+            Vector2 position = new Vector2(state.X, state.Y);
+            if (_clientCrateAudioStates.TryGetValue(crateId, out ClientCrateAudioState previous))
+            {
+                if (!previous.Destroyed && state.Destroyed)
+                {
+                    _sound.PlayWorld(WorldSound.CrateBreak, listener, position, 480f, true);
+                }
+                else if (!state.Destroyed && state.Health < previous.Health)
+                {
+                    _sound.PlayWorld(WorldSound.CrateHit, listener, position, 480f, true);
+                }
+            }
+
+            next[crateId] = new ClientCrateAudioState
+            {
+                Health = state.Health,
+                Destroyed = state.Destroyed,
+                Position = position
+            };
+        }
+
+        _clientCrateAudioStates.Clear();
+        foreach (KeyValuePair<int, ClientCrateAudioState> pair in next)
+        {
+            _clientCrateAudioStates[pair.Key] = pair.Value;
+        }
+    }
+
     private void DamageLootCrate(LootCrate crate, int damage)
     {
         if (crate.Destroyed)
@@ -889,7 +952,7 @@ public sealed partial class Game
         }
 
         bool destroyed = crate.ApplyDamage(damage);
-        _sound.PlayWorld(destroyed ? WorldSound.Barricade : WorldSound.Hit, Player.Position, crate.Position, 480f, true);
+        _sound.PlayWorld(destroyed ? WorldSound.CrateBreak : WorldSound.CrateHit, Player.Position, crate.Position, 480f, true);
 
         if (!destroyed)
         {
@@ -1721,21 +1784,21 @@ public sealed partial class Game
         }
     }
 
-    private void PlayWeaponShotSound(Player player, Vector2 muzzle, Weapon weapon)
+    private void PlayWeaponShotSound(Vector2 listenerPosition, Vector2 muzzle, Weapon weapon)
     {
         switch (weapon.Name)
         {
             case "SMG":
-                _sound.PlayWorld(WorldSound.SmgShot, player.Position, muzzle, 760f, true);
+                _sound.PlayWorld(WorldSound.SmgShot, listenerPosition, muzzle, 760f, true);
                 break;
             case "Shotgun":
-                _sound.PlayWorld(WorldSound.ShotgunShot, player.Position, muzzle, 760f, true);
+                _sound.PlayWorld(WorldSound.ShotgunShot, listenerPosition, muzzle, 760f, true);
                 break;
             case "Carbine":
-                _sound.PlayWorld(WorldSound.CarbineShot, player.Position, muzzle, 760f, true);
+                _sound.PlayWorld(WorldSound.CarbineShot, listenerPosition, muzzle, 760f, true);
                 break;
             default:
-                _sound.PlayWorld(WorldSound.RifleShot, player.Position, muzzle, 760f, true);
+                _sound.PlayWorld(WorldSound.RifleShot, listenerPosition, muzzle, 760f, true);
                 break;
         }
     }
@@ -1747,7 +1810,7 @@ public sealed partial class Game
         SpawnWeaponBullets(_bullets, muzzle, player.AimAngle, weapon, player.GetCurrentSpreadRadians(), player.GetShotDamage(), ownerPlayerIndex, player.Accent);
         player.NotifyShot();
         player.ConsumeShot();
-        PlayWeaponShotSound(player, muzzle, weapon);
+        PlayWeaponShotSound(player.Position, muzzle, weapon);
     }
 
     private void FireClientWeaponRequest(Player player)
@@ -1758,7 +1821,7 @@ public sealed partial class Game
         SpawnWeaponBullets(_clientPredictedBullets, muzzle, player.AimAngle, weapon, player.GetCurrentSpreadRadians(), player.GetShotDamage(), ownerPlayerIndex, Color.FromArgb(218, player.Accent));
         player.NotifyShot();
         player.ConsumeShot();
-        PlayWeaponShotSound(player, muzzle, weapon);
+        PlayWeaponShotSound(player.Position, muzzle, weapon);
     }
 
     private void UpdateClientPredictedBullets(float dt)
@@ -1911,6 +1974,7 @@ public sealed partial class Game
         Weapon weapon = WeaponCatalog.FindByName(remote.WeaponName) ?? WeaponCatalog.Rifle;
         Vector2 muzzle = remote.TargetPosition + Phys.FromAngle(remote.AimAngle) * 22f;
         SpawnWeaponBullets(_bullets, muzzle, remote.AimAngle, weapon, weapon.SpreadRadians, Math.Max(1, weapon.Damage), remote.PlayerId, remote.Accent);
+        PlayWeaponShotSound(Player.Position, muzzle, weapon);
     }
 
     private void FireRemoteWeaponPredicted(RemotePlayerView remote)
@@ -1918,6 +1982,7 @@ public sealed partial class Game
         Weapon weapon = WeaponCatalog.FindByName(remote.WeaponName) ?? WeaponCatalog.Rifle;
         Vector2 muzzle = remote.TargetPosition + Phys.FromAngle(remote.AimAngle) * 22f;
         SpawnWeaponBullets(_clientPredictedBullets, muzzle, remote.AimAngle, weapon, weapon.SpreadRadians, Math.Max(1, weapon.Damage), remote.PlayerId, Color.FromArgb(176, remote.Accent));
+        PlayWeaponShotSound(Player.Position, muzzle, weapon);
     }
 
     private void ApplyRemoteClientVisualActions(RemotePlayerView remote)
@@ -2063,11 +2128,14 @@ public sealed partial class Game
             _turrets.Add(turret);
         }
 
+        SyncClientLootCrateAudio(world);
+
         _lootCrates.Clear();
         foreach (NetLootCrateState state in world.Crates)
         {
             LootCrate crate = new LootCrate(new Vector2(state.X, state.Y), Math.Max(1, state.MaxHealth), state.Radius)
             {
+                NetworkId = Math.Max(1, state.Id),
                 Health = Math.Clamp(state.Health, 0, Math.Max(1, state.MaxHealth)),
                 MaxHealth = Math.Max(1, state.MaxHealth),
                 HitFlash = state.HitFlash,

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Media;
 using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Text;
 
 namespace SlayInspiredPrototype;
 
@@ -25,13 +27,19 @@ public enum WorldSound
     Pickup,
     Hit,
     Barricade,
-    Zombie
+    Zombie,
+    CrateHit,
+    CrateBreak
 }
 
 public sealed class SoundManager
 {
+    [DllImport("winmm.dll", CharSet = CharSet.Auto)]
+    private static extern int mciSendString(string command, StringBuilder? buffer, int bufferSize, IntPtr hwndCallback);
+
     private readonly object _sync = new object();
     private readonly List<(MemoryStream stream, DateTime utc)> _activeStreams = new List<(MemoryStream stream, DateTime utc)>();
+    private readonly List<(string alias, DateTime utc)> _activeAliases = new List<(string alias, DateTime utc)>();
     private readonly Dictionary<string, DateTime> _cooldowns = new Dictionary<string, DateTime>();
 
     public bool Enabled { get; set; } = true;
@@ -131,6 +139,18 @@ public sealed class SoundManager
                 key = "zombie";
                 cooldownMs = 140;
                 break;
+            case WorldSound.CrateHit:
+                freq = 210f;
+                duration = 0.045f;
+                key = "crate_hit";
+                cooldownMs = 16;
+                break;
+            case WorldSound.CrateBreak:
+                freq = 130f;
+                duration = 0.18f;
+                key = "crate_break";
+                cooldownMs = 80;
+                break;
             default:
                 freq = 820f;
                 duration = 0.02f;
@@ -140,6 +160,24 @@ public sealed class SoundManager
         }
 
         LastMixInfo = $"AUDIO {(use3D ? "3D" : "2D")} pan {pan:0.00} attn {attenuation:0.00}";
+
+        if (cue == WorldSound.CrateHit)
+        {
+            string? file = AssetLocator.Find("Assets/audio/crate_bullet.mp3");
+            if (TryPlayFile(file, key, cooldownMs, attenuation * 0.9f, pan))
+            {
+                return;
+            }
+        }
+        else if (cue == WorldSound.CrateBreak)
+        {
+            string? file = AssetLocator.Find("Assets/audio/crate_break.mp3");
+            if (TryPlayFile(file, key, cooldownMs, attenuation, pan))
+            {
+                return;
+            }
+        }
+
         PlayTone(freq * (0.78f + attenuation * 0.35f), duration, pan, attenuation * 0.3f, key, cooldownMs);
     }
 
@@ -158,6 +196,7 @@ public sealed class SoundManager
         {
             _activeStreams.Add((stream, DateTime.UtcNow));
             CleanupStreamsUnsafe();
+            CleanupAliasesUnsafe();
         }
 
         try
@@ -182,6 +221,57 @@ public sealed class SoundManager
 
             _cooldowns[key] = now.AddMilliseconds(cooldownMs);
             return true;
+        }
+    }
+
+    private bool TryPlayFile(string? assetPath, string key, int cooldownMs, float volumeScale, float pan)
+    {
+        if (string.IsNullOrWhiteSpace(assetPath) || !File.Exists(assetPath) || !CanPlay(key, cooldownMs))
+        {
+            return false;
+        }
+
+        string alias = $"snd_{key}_{Environment.TickCount64}_{_activeAliases.Count}";
+        string escapedPath = assetPath.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        float clampedVolume = Math.Clamp(volumeScale, 0.04f, 1f);
+        float clampedPan = Math.Clamp(pan, -1f, 1f);
+        float leftGain = clampedVolume * (clampedPan <= 0f ? 1f : 1f - clampedPan);
+        float rightGain = clampedVolume * (clampedPan >= 0f ? 1f : 1f + clampedPan);
+        int masterVolume = Math.Clamp((int)(clampedVolume * 1000f), 40, 1000);
+        int leftVolume = Math.Clamp((int)(leftGain * 1000f), 0, 1000);
+        int rightVolume = Math.Clamp((int)(rightGain * 1000f), 0, 1000);
+
+        lock (_sync)
+        {
+            CleanupAliasesUnsafe();
+            if (mciSendString($"open \"{escapedPath}\" type mpegvideo alias {alias}", null, 0, IntPtr.Zero) != 0)
+            {
+                return false;
+            }
+
+            mciSendString($"setaudio {alias} volume to {masterVolume}", null, 0, IntPtr.Zero);
+            mciSendString($"setaudio {alias} left volume to {leftVolume}", null, 0, IntPtr.Zero);
+            mciSendString($"setaudio {alias} right volume to {rightVolume}", null, 0, IntPtr.Zero);
+            if (mciSendString($"play {alias} from 0", null, 0, IntPtr.Zero) != 0)
+            {
+                mciSendString($"close {alias}", null, 0, IntPtr.Zero);
+                return false;
+            }
+
+            _activeAliases.Add((alias, DateTime.UtcNow));
+            return true;
+        }
+    }
+
+    private void CleanupAliasesUnsafe()
+    {
+        for (int i = _activeAliases.Count - 1; i >= 0; i--)
+        {
+            if ((DateTime.UtcNow - _activeAliases[i].utc).TotalSeconds > 8)
+            {
+                try { mciSendString($"close {_activeAliases[i].alias}", null, 0, IntPtr.Zero); } catch { }
+                _activeAliases.RemoveAt(i);
+            }
         }
     }
 

@@ -11,6 +11,7 @@ public sealed class LootCrate
     public int Health;
     public float HitFlash;
     public bool Destroyed;
+    public int NetworkId;
 
     public LootCrate(Vector2 position, int health = 42, float radius = 18f)
     {
@@ -20,6 +21,7 @@ public sealed class LootCrate
         Health = MaxHealth;
         HitFlash = 0f;
         Destroyed = false;
+        NetworkId = 0;
     }
 
     public void Update(float dt)
