@@ -31,8 +31,9 @@ public sealed class NetworkClient : IDisposable
     private DateTime _lastWorldSnapshotUtc = DateTime.MinValue;
     private int _roundTripMs;
     private int _lastKnownPlayers = 1;
-    private int _playerSnapshotRateHz = 20;
-    private int _worldSnapshotRateHz = 8;
+    private int _playerSnapshotRateHz = 30;
+    private int _worldSnapshotRateHz = 15;
+    private DateTime _lastReceiveUtc = DateTime.MinValue;
 
     public string Host { get; }
     public int Port { get; }
@@ -57,6 +58,7 @@ public sealed class NetworkClient : IDisposable
     }
 
     public int LastKnownPlayers => _lastKnownPlayers;
+    public bool IsSessionHealthy => IsConnected && (_lastReceiveUtc == DateTime.MinValue || (DateTime.UtcNow - _lastReceiveUtc).TotalSeconds < 8);
 
     public NetworkClient(string host, int port)
     {
@@ -64,7 +66,7 @@ public sealed class NetworkClient : IDisposable
         Port = port;
     }
 
-    public async Task ConnectAsync(string callsign)
+    public async Task ConnectAsync(string callsign, string sessionId)
     {
         _client = new TcpClient
         {
@@ -77,10 +79,11 @@ public sealed class NetworkClient : IDisposable
         _reader = new StreamReader(_client.GetStream());
         _writer = new StreamWriter(_client.GetStream()) { AutoFlush = true };
         Status = "connected";
+        _lastReceiveUtc = DateTime.UtcNow;
         _sendTask = Task.Run(SendLoopAsync);
         _receiveTask = Task.Run(ReceiveLoopAsync);
         _pingTask = Task.Run(PingLoopAsync);
-        EnqueueReliable(new NetHello { Callsign = callsign });
+        EnqueueReliable(new NetHello { Callsign = callsign, SessionId = sessionId });
 
         Task completed = await Task.WhenAny(_assignedTcs.Task, Task.Delay(TimeSpan.FromSeconds(5), _cts.Token)).ConfigureAwait(false);
         if (completed != _assignedTcs.Task)
@@ -215,6 +218,8 @@ public sealed class NetworkClient : IDisposable
                     break;
                 }
 
+                _lastReceiveUtc = DateTime.UtcNow;
+
                 JsonDocument? doc = null;
                 try
                 {
@@ -302,6 +307,8 @@ public sealed class NetworkClient : IDisposable
     {
         _cts.Cancel();
         try { _sendSignal.Release(); } catch { }
+        try { _reader?.Dispose(); } catch { }
+        try { _writer?.Dispose(); } catch { }
         try { _client?.Close(); } catch { }
         _client = null;
     }

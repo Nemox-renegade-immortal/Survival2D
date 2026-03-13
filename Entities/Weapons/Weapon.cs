@@ -151,6 +151,20 @@ public sealed class WeaponState
         AmmoInClip = Math.Clamp(AmmoInClip, 0, EffectiveClipSize);
         AmmoReserve = Math.Max(0, AmmoReserve);
     }
+
+    public void ApplyNetworkState(int level, int ammoInClip, int ammoReserve)
+    {
+        if (IsEmpty)
+        {
+            return;
+        }
+
+        Unlocked = true;
+        Level = Math.Max(1, level);
+        AmmoInClip = ammoInClip;
+        AmmoReserve = ammoReserve;
+        ClampAmmo();
+    }
 }
 
 public static class WeaponCatalog

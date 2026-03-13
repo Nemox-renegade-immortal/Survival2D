@@ -55,6 +55,35 @@ public sealed partial class Game
         public Vector2 Position;
     }
 
+    private sealed class ClientZombieVisualState
+    {
+        public int Health;
+        public bool IsAlive;
+        public Vector2 Position;
+        public Color Tint;
+    }
+
+    private enum NetworkFxEventType
+    {
+        Ricochet = 0,
+        ZombieBlood = 1,
+        CrateImpact = 2,
+        Explosion = 3
+    }
+
+    private sealed class NetworkFxEvent
+    {
+        public int Id;
+        public NetworkFxEventType Type;
+        public Vector2 Position;
+        public Vector2 Velocity;
+        public float Radius;
+        public Color Tint;
+        public int Value;
+        public bool Flag;
+        public float RemainingLifetime;
+    }
+
     private bool _useFastUi = true;
     private float _smoothedRenderFps = 60f;
     private float _qualitySwitchCooldown;
@@ -70,11 +99,16 @@ public sealed partial class Game
     private readonly Dictionary<int, RemoteActionTracker> _remoteActionTrackers = new Dictionary<int, RemoteActionTracker>();
     private readonly List<Player> _players = new List<Player>();
     private readonly List<RemotePlayerView> _remotePlayers = new List<RemotePlayerView>();
+    private readonly List<Vector2> _doorActors = new List<Vector2>(96);
     private readonly List<Zombie> _zombies = new List<Zombie>();
     private int _nextZombieNetworkId = 1;
     private int _nextLootCrateNetworkId = 1;
+    private int _nextGrenadeNetworkId = 1;
+    private int _nextExplosionNetworkId = 1;
+    private int _nextNetworkFxEventId = 1;
     private readonly List<Bullet> _bullets = new List<Bullet>();
     private readonly List<Bullet> _clientPredictedBullets = new List<Bullet>();
+    private readonly List<Grenade> _clientPredictedGrenades = new List<Grenade>();
     private readonly List<Grenade> _grenades = new List<Grenade>();
     private readonly List<Explosion> _explosions = new List<Explosion>();
     private readonly List<Pickup> _pickups = new List<Pickup>();
@@ -82,10 +116,15 @@ public sealed partial class Game
     private readonly List<ScrapPile> _scrapPiles = new List<ScrapPile>();
     private readonly List<LootCrate> _lootCrates = new List<LootCrate>();
     private readonly Dictionary<int, ClientCrateAudioState> _clientCrateAudioStates = new Dictionary<int, ClientCrateAudioState>();
+    private readonly Dictionary<int, ClientZombieVisualState> _clientZombieVisualStates = new Dictionary<int, ClientZombieVisualState>();
+    private readonly HashSet<int> _clientSeenExplosionIds = new HashSet<int>();
+    private readonly List<NetworkFxEvent> _networkFxEvents = new List<NetworkFxEvent>();
+    private readonly HashSet<int> _clientSeenFxEventIds = new HashSet<int>();
     private readonly List<MenuButton> _menuButtons = new List<MenuButton>();
     private readonly SoundManager _sound = new SoundManager();
     private readonly NetworkManager _network = new NetworkManager();
     private readonly DayNightCycle _dayNight = new DayNightCycle();
+    private float _pistolTriggerBufferTimer;
     private RectangleF _worldDrawBounds;
     private readonly Font _titleFont = new Font("Segoe UI", 24f, FontStyle.Bold);
     private readonly Font _menuFont = new Font("Segoe UI", 13f, FontStyle.Bold);
@@ -127,6 +166,7 @@ public sealed partial class Game
     private int _activeMapSeed;
     private float _backgroundPulse;
     private int _scrapCraftCost = 4;
+    private int _barricadeTechLevel;
     private bool _nightWaveStarted;
     private bool _nightRewardGranted;
     private float _crateRespawnTimer;
@@ -148,7 +188,7 @@ public sealed partial class Game
 
     private void ResetInventoryLayout()
     {
-        int[] defaults = new[] { 0, 10, 11, 12, 4, 6, 7, 8, 9, 1, 2, 3, 5 };
+        int[] defaults = new[] { 0, 10, 11, 12, 13, 14, 15, 16, 17, 4, 5, 6, 7, 8, 9, 1, 2, 3 };
         for (int i = 0; i < _inventoryLayout.Length; i++)
         {
             _inventoryLayout[i] = i < defaults.Length ? defaults[i] : i;
@@ -418,8 +458,17 @@ public sealed partial class Game
         mg.CompositingQuality = CompositingQuality.HighSpeed;
         mg.Clear(Color.FromArgb(10, 12, 16));
 
-        using SolidBrush wallBrush = new SolidBrush(Color.FromArgb(150, 82, 90, 102));
-        using SolidBrush barricadeBrush = new SolidBrush(Color.FromArgb(170, 110, 76, 46));
+        using SolidBrush grassBrush = new SolidBrush(Color.FromArgb(72, 34, 86, 54));
+        using SolidBrush stoneFloorBrush = new SolidBrush(Color.FromArgb(76, 78, 82, 90));
+        using SolidBrush shoreBrush = new SolidBrush(Color.FromArgb(86, 124, 114, 84));
+        using SolidBrush waterBrush = new SolidBrush(Color.FromArgb(110, 46, 108, 146));
+        using SolidBrush stoneWallBrush = new SolidBrush(Color.FromArgb(170, 86, 94, 108));
+        using SolidBrush barricadeBrush = new SolidBrush(Color.FromArgb(176, 122, 86, 54));
+        using SolidBrush treeBrush = new SolidBrush(Color.FromArgb(176, 50, 108, 64));
+        using SolidBrush woodBrush = new SolidBrush(Color.FromArgb(176, 128, 90, 58));
+        using SolidBrush doorBrush = new SolidBrush(Color.FromArgb(176, 196, 164, 96));
+        using SolidBrush rockBrush = new SolidBrush(Color.FromArgb(176, 110, 118, 124));
+        using SolidBrush bushBrush = new SolidBrush(Color.FromArgb(176, 62, 126, 82));
 
         float sx = width / (float)Map.Width;
         float sy = height / (float)Map.Height;
@@ -428,13 +477,44 @@ public sealed partial class Game
         {
             for (int y = 0; y < Map.Height; y++)
             {
+                RectangleF cell = new RectangleF(x * sx, y * sy, Math.Max(1f, sx), Math.Max(1f, sy));
+                int floorValue = Map.GetFloorValue(x, y);
+                if (floorValue == TileMap.FloorGrass)
+                {
+                    mg.FillRectangle(grassBrush, cell);
+                }
+                else if (floorValue == TileMap.FloorStone)
+                {
+                    mg.FillRectangle(stoneFloorBrush, cell);
+                }
+                else if (floorValue == TileMap.FloorShore)
+                {
+                    mg.FillRectangle(shoreBrush, cell);
+                }
+                else if (floorValue == TileMap.FloorWater)
+                {
+                    mg.FillRectangle(waterBrush, cell);
+                }
+
                 int value = Map.GetTileValue(x, y);
                 if (value == 0)
                 {
                     continue;
                 }
 
-                mg.FillRectangle(value == 1 ? wallBrush : barricadeBrush, x * sx, y * sy, Math.Max(1f, sx), Math.Max(1f, sy));
+                Brush brush = value switch
+                {
+                    TileMap.TileStoneWall => stoneWallBrush,
+                    TileMap.TileBarricade => barricadeBrush,
+                    TileMap.TileTree => treeBrush,
+                    TileMap.TileWoodWall => woodBrush,
+                    TileMap.TileDoorClosed => doorBrush,
+                    TileMap.TileDoorOpen => stoneFloorBrush,
+                    TileMap.TileRock => rockBrush,
+                    TileMap.TileBush => bushBrush,
+                    _ => stoneWallBrush
+                };
+                mg.FillRectangle(brush, cell);
             }
         }
     }
@@ -678,7 +758,7 @@ public sealed partial class Game
         }
 
         _rng = new Random(_activeMapSeed);
-        Map = new TileMap(42, 26, _rng);
+        Map = new TileMap(104, 68, _rng);
         ResetToTitle();
     }
 
@@ -800,12 +880,69 @@ public sealed partial class Game
         return zombie;
     }
 
+    private int AllocateGrenadeNetworkId()
+    {
+        int id = Math.Max(1, _nextGrenadeNetworkId);
+        _nextGrenadeNetworkId = id >= int.MaxValue - 1 ? 1 : id + 1;
+        return id;
+    }
+
+    private int AllocateExplosionNetworkId()
+    {
+        int id = Math.Max(1, _nextExplosionNetworkId);
+        _nextExplosionNetworkId = id >= int.MaxValue - 1 ? 1 : id + 1;
+        return id;
+    }
+
+    private int AllocateNetworkFxEventId()
+    {
+        int id = Math.Max(1, _nextNetworkFxEventId);
+        _nextNetworkFxEventId = id >= int.MaxValue - 1 ? 1 : id + 1;
+        return id;
+    }
+
+    private void QueueNetworkFxEvent(NetworkFxEventType type, Vector2 position, Vector2 velocity, float radius, Color tint, int value = 0, bool flag = false, float holdSeconds = 0.9f)
+    {
+        _networkFxEvents.Add(new NetworkFxEvent
+        {
+            Id = AllocateNetworkFxEventId(),
+            Type = type,
+            Position = position,
+            Velocity = velocity,
+            Radius = radius,
+            Tint = tint,
+            Value = value,
+            Flag = flag,
+            RemainingLifetime = Math.Max(0.2f, holdSeconds)
+        });
+
+        if (_networkFxEvents.Count > 96)
+        {
+            _networkFxEvents.RemoveRange(0, _networkFxEvents.Count - 96);
+        }
+    }
+
+    private void UpdateNetworkFxEvents(float dt)
+    {
+        for (int i = _networkFxEvents.Count - 1; i >= 0; i--)
+        {
+            NetworkFxEvent fx = _networkFxEvents[i];
+            fx.RemainingLifetime -= dt;
+            if (fx.RemainingLifetime <= 0f)
+            {
+                _networkFxEvents.RemoveAt(i);
+            }
+        }
+    }
+
     private void ClearRuntime()
     {
         _remotePlayers.Clear();
+        _remotePlayerSmoothing.Clear();
         _zombies.Clear();
         _bullets.Clear();
         _clientPredictedBullets.Clear();
+        _clientPredictedGrenades.Clear();
         _grenades.Clear();
         _explosions.Clear();
         _pickups.Clear();
@@ -814,33 +951,49 @@ public sealed partial class Game
         _lootCrates.Clear();
         _remoteActionTrackers.Clear();
         _clientCrateAudioStates.Clear();
+        _clientZombieVisualStates.Clear();
+        _clientSeenExplosionIds.Clear();
+        _networkFxEvents.Clear();
+        _clientSeenFxEventIds.Clear();
+        _worldParticles.Clear();
         _nextZombieNetworkId = 1;
         _nextLootCrateNetworkId = 1;
+        _nextGrenadeNetworkId = 1;
+        _nextExplosionNetworkId = 1;
+        _nextNetworkFxEventId = 1;
         _crateRespawnTimer = 10f;
         _screenShakeTimer = 0f;
         _screenShakePower = 0f;
         _bloodOverlay = 0f;
         _damagePulse = 0f;
         _damageKick = Vector2.Zero;
+        _equippedSupportRawIndex = -1;
+        _inventoryUpgradeWeaponIndex = 0;
+        _craftRecipeIndex = 0;
+        _upgradeWorkbenchIndex = 0;
+        _inventoryViewMode = InventoryViewMode.Inventory;
     }
 
     private void SeedScavenge()
     {
-        for (int i = 0; i < 8; i++)
+        int worldScale = Math.Max(1, (Map.Width * Map.Height) / (42 * 26));
+
+        for (int i = 0; i < 8 + worldScale * 3; i++)
         {
             _scrapPiles.Add(new ScrapPile(Map.GetRandomFreePoint(_rng), 2 + _rng.Next(3)));
         }
 
-        SpawnLootCrates(6);
+        SpawnLootCrates(6 + worldScale * 2);
         _crateRespawnTimer = 8f + (float)_rng.NextDouble() * 6f;
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 3 + worldScale; i++)
         {
             _pickups.Add(new Pickup(PickupType.Ammo, Map.GetRandomFreePoint(_rng), 1));
         }
 
         _pickups.Add(new Pickup(PickupType.Medkit, Map.GetRandomFreePoint(_rng), 24));
         _pickups.Add(new Pickup(PickupType.Armor, Map.GetRandomFreePoint(_rng), 18));
+        _pickups.Add(new Pickup(PickupType.Credits, Map.GetRandomFreePoint(_rng), 12 + worldScale * 4));
     }
 
     private void SpawnLootCrates(int count)
@@ -910,24 +1063,12 @@ public sealed partial class Game
             return;
         }
 
-        Vector2 listener = Player.Position;
         Dictionary<int, ClientCrateAudioState> next = new Dictionary<int, ClientCrateAudioState>(world.Crates.Count);
 
         foreach (NetLootCrateState state in world.Crates)
         {
             int crateId = Math.Max(1, state.Id);
             Vector2 position = new Vector2(state.X, state.Y);
-            if (_clientCrateAudioStates.TryGetValue(crateId, out ClientCrateAudioState previous))
-            {
-                if (!previous.Destroyed && state.Destroyed)
-                {
-                    _sound.PlayWorld(WorldSound.CrateBreak, listener, position, 480f, true);
-                }
-                else if (!state.Destroyed && state.Health < previous.Health)
-                {
-                    _sound.PlayWorld(WorldSound.CrateHit, listener, position, 480f, true);
-                }
-            }
 
             next[crateId] = new ClientCrateAudioState
             {
@@ -944,6 +1085,51 @@ public sealed partial class Game
         }
     }
 
+    private void SyncClientZombieVisualEffects(NetWorldState world)
+    {
+        if (_network.Mode != NetMode.Client || _players.Count == 0)
+        {
+            return;
+        }
+
+        Dictionary<int, ClientZombieVisualState> next = new Dictionary<int, ClientZombieVisualState>(world.Zombies.Count);
+        foreach (NetZombieState state in world.Zombies)
+        {
+            int zombieId = Math.Max(1, state.Id);
+            Vector2 position = new Vector2(state.X, state.Y);
+            Color tint = Zombie.Create((ZombieKind)Math.Clamp(state.KindId, 0, (int)ZombieKind.Boss), position, Math.Max(1, _waveNumber)).Tint;
+            bool isAlive = state.IsAlive && state.Health > 0;
+
+
+            next[zombieId] = new ClientZombieVisualState
+            {
+                Health = state.Health,
+                IsAlive = isAlive,
+                Position = position,
+                Tint = tint
+            };
+        }
+
+        _clientZombieVisualStates.Clear();
+        foreach (KeyValuePair<int, ClientZombieVisualState> pair in next)
+        {
+            _clientZombieVisualStates[pair.Key] = pair.Value;
+        }
+    }
+
+    private void SyncClientExplosionEffects(NetWorldState world)
+    {
+        if (_network.Mode != NetMode.Client || _players.Count == 0)
+        {
+            return;
+        }
+
+        foreach (NetExplosionState state in world.Explosions)
+        {
+            _clientSeenExplosionIds.Add(Math.Max(1, state.Id));
+        }
+    }
+
     private void DamageLootCrate(LootCrate crate, int damage)
     {
         if (crate.Destroyed)
@@ -953,6 +1139,8 @@ public sealed partial class Game
 
         bool destroyed = crate.ApplyDamage(damage);
         _sound.PlayWorld(destroyed ? WorldSound.CrateBreak : WorldSound.CrateHit, Player.Position, crate.Position, 480f, true);
+        SpawnCrateImpactBurst(crate.Position, damage, destroyed);
+        QueueNetworkFxEvent(NetworkFxEventType.CrateImpact, crate.Position, Vector2.Zero, crate.Radius, Color.Peru, damage, destroyed);
 
         if (!destroyed)
         {
@@ -964,7 +1152,7 @@ public sealed partial class Game
         {
             Vector2 dir = Phys.FromAngle((float)(_rng.NextDouble() * Math.PI * 2.0));
             Vector2 drop = crate.Position + dir * (8f + (float)_rng.NextDouble() * 16f);
-            if (!Map.CollidesCircle(drop, 10f))
+            if (Map.IsBuildableCircle(drop, 10f))
             {
                 _scrapPiles.Add(new ScrapPile(drop, 1 + _rng.Next(2)));
             }
@@ -1020,6 +1208,67 @@ public sealed partial class Game
         {
             _damageKick = dir * (10f + damage * 0.28f);
         }
+    }
+
+    private bool TryCraftWeaponUnlock(Player player, string weaponName, int scrapCost, int creditCost)
+    {
+        WeaponState? weaponState = player.GetWeaponState(weaponName);
+        if (weaponState is null || weaponState.IsEmpty)
+        {
+            SetAnnouncement("Recipe unavailable", 0.8f);
+            _sound.PlayUi(UiSound.Error);
+            return false;
+        }
+
+        if (weaponState.Unlocked)
+        {
+            SetAnnouncement($"{weaponName} already crafted", 0.8f);
+            _sound.PlayUi(UiSound.Error);
+            return false;
+        }
+
+        if (!TrySpendCraftResources(player, scrapCost, creditCost, string.Empty))
+        {
+            return false;
+        }
+
+        player.UnlockWeapon(weaponName);
+        player.NotifyPickup();
+        SetAnnouncement($"{weaponName} crafted", 0.9f);
+        _sound.PlayWorld(WorldSound.Pickup, player.Position, player.Position, 80f, false);
+        return true;
+    }
+
+    private int GetBarricadeTechCost()
+    {
+        return 40 + _barricadeTechLevel * 30;
+    }
+
+    private bool TryBuyBarricadeTech(Player player)
+    {
+        if (_barricadeTechLevel >= 3)
+        {
+            SetAnnouncement("Barricade tech maxed", 0.8f);
+            _sound.PlayUi(UiSound.Error);
+            return false;
+        }
+
+        int cost = GetBarricadeTechCost();
+        if (player.Credits < cost)
+        {
+            SetAnnouncement($"Need {cost} credits", 0.8f);
+            _sound.PlayUi(UiSound.Error);
+            return false;
+        }
+
+        player.Credits -= cost;
+        _barricadeTechLevel++;
+        _scrapCraftCost = Math.Max(2, _scrapCraftCost - 1);
+        player.BarricadeKits++;
+        player.NotifyPickup();
+        SetAnnouncement("Barricade tech upgraded", 0.9f);
+        _sound.PlayWorld(WorldSound.Pickup, player.Position, player.Position, 80f, false);
+        return true;
     }
 
     private bool TryCraftBarricade(Player player)
@@ -1165,12 +1414,15 @@ public sealed partial class Game
     {
         return recipeIndex switch
         {
-            0 => TryCraftBarricade(player),
-            1 => TryCraftAmmoCache(player),
-            2 => TryCraftArmorPlate(player),
-            3 => TryCraftMedPatch(player),
-            4 => TryCraftTurretBattery(player),
-            5 => TryCraftOverdriveCell(player),
+            0 => TryCraftWeaponUnlock(player, "SMG", 4, 40),
+            1 => TryCraftWeaponUnlock(player, "SHOTGUN", 6, 80),
+            2 => TryCraftWeaponUnlock(player, "CARBINE", 8, 110),
+            3 => TryCraftBarricade(player),
+            4 => TryCraftAmmoCache(player),
+            5 => TryCraftArmorPlate(player),
+            6 => TryCraftMedPatch(player),
+            7 => TryCraftTurretBattery(player),
+            8 => TryCraftOverdriveCell(player),
             _ => false
         };
     }
@@ -1233,7 +1485,11 @@ public sealed partial class Game
         Vector2 dir = Phys.FromAngle(player.AimAngle);
         if (_network.Mode != NetMode.Client)
         {
-            _grenades.Add(new Grenade(player.Position + dir * 20f, dir * 500f, 7f, 0.9f, player.GrenadeDamage, player.GrenadeRadius, 0, Color.Orange));
+            _grenades.Add(new Grenade(player.Position + dir * 20f, dir * 500f, 7f, 0.9f, player.GrenadeDamage, player.GrenadeRadius, 0, Color.Orange, AllocateGrenadeNetworkId()));
+        }
+        else
+        {
+            _clientPredictedGrenades.Add(new Grenade(player.Position + dir * 20f, dir * 500f, 7f, 0.9f, player.GrenadeDamage, player.GrenadeRadius, Math.Max(1, _network.LocalPlayerId), Color.FromArgb(210, Color.Orange)));
         }
         player.BeginGrenadeCooldown();
         player.NotifyGrenade();
@@ -1299,19 +1555,47 @@ public sealed partial class Game
             return false;
         }
 
-        return !Map.IsBlocking(tx, ty);
+        return !Map.IsBlocking(tx, ty) && Map.IsBuildableSurface(tx, ty);
     }
 
     private bool TryGetTurretPreview(Player player, out Vector2 position)
     {
         position = player.Position + Phys.FromAngle(player.AimAngle) * 42f;
-        return !Map.CollidesCircle(position, 16f);
+        return Map.IsBuildableCircle(position, 16f);
     }
 
     private void SetAnnouncement(string text, float duration)
     {
         _announcement = text;
         _announcementTimer = duration;
+    }
+
+    private void UpdateWorldDoors()
+    {
+        _doorActors.Clear();
+
+        for (int i = 0; i < _players.Count; i++)
+        {
+            if (_players[i].IsAlive)
+            {
+                _doorActors.Add(_players[i].Position);
+            }
+        }
+
+        for (int i = 0; i < _remotePlayers.Count; i++)
+        {
+            _doorActors.Add(_remotePlayers[i].Position);
+        }
+
+        for (int i = 0; i < _zombies.Count; i++)
+        {
+            if (_zombies[i].IsAlive)
+            {
+                _doorActors.Add(_zombies[i].Position);
+            }
+        }
+
+        Map.UpdateDoors(_doorActors);
     }
 
     public void Update(float dt, InputState input, Size clientSize)
@@ -1516,15 +1800,17 @@ public sealed partial class Game
         }
 
         _survivalTime += dt;
+        _pistolTriggerBufferTimer = MathF.Max(0f, _pistolTriggerBufferTimer - dt);
         _dayNight.Tick(dt);
         HandleDayNightTransitions();
         UpdateInventoryInput(input);
         UpdateLocalPlayer(dt, input, clientSize);
-        UpdateNetworkGhosts();
+        UpdateNetworkGhosts(dt);
 
         if (_network.Mode == NetMode.Client)
         {
             UpdateClientPredictedBullets(dt);
+            UpdateClientPredictedGrenades(dt);
             SyncClientWorldFromNetwork(dt);
             SyncClientLocalPlayerStateFromNetwork();
             UpdatePickups();
@@ -1541,6 +1827,7 @@ public sealed partial class Game
             UpdateExplosions(dt);
             UpdatePickups();
             UpdateScrapPiles();
+            UpdateNetworkFxEvents(dt);
 
             if (_network.Mode == NetMode.Host)
             {
@@ -1548,6 +1835,9 @@ public sealed partial class Game
                 PushWorldSyncState();
             }
         }
+
+        UpdateWorldParticles(dt);
+        UpdateWorldDoors();
 
         if (!_players.Any(p => p.IsAlive))
         {
@@ -1584,7 +1874,7 @@ public sealed partial class Game
             player.TryStartDash(move);
         }
 
-        float speed = player.MoveSpeed * player.GetCurrentMoveSpeedMultiplier();
+        float speed = player.MoveSpeed * player.GetCurrentMoveSpeedMultiplier() * Map.GetSurfaceSpeedMultiplier(player.Position);
         Vector2 desired = player.Position + ((player.IsDashing ? player.DashDirection : move) * speed * dt);
         player.Position = Phys.ResolveCircleVsWorld(player.Position, desired, player.Radius, Map);
 
@@ -1682,7 +1972,23 @@ public sealed partial class Game
             TryThrowGrenade(player);
         }
 
-        if (!_inventoryOpen && !IsSupportEquipped() && input.LeftMouseDown && player.CanShoot())
+        bool isPistolEquipped = string.Equals(player.Weapon.Name, "Pistol", StringComparison.OrdinalIgnoreCase);
+        if (isPistolEquipped && input.LeftMousePressed)
+        {
+            _pistolTriggerBufferTimer = 0.115f;
+        }
+        else if (!isPistolEquipped)
+        {
+            _pistolTriggerBufferTimer = 0f;
+        }
+
+        if (_inventoryOpen || IsSupportEquipped())
+        {
+            _pistolTriggerBufferTimer = 0f;
+        }
+
+        bool wantsShoot = !_inventoryOpen && !IsSupportEquipped() && (isPistolEquipped ? _pistolTriggerBufferTimer > 0f : input.LeftMouseDown);
+        if (wantsShoot && player.CanShoot())
         {
             if (_network.Mode == NetMode.Client)
             {
@@ -1691,6 +1997,11 @@ public sealed partial class Game
             else
             {
                 FirePlayerWeapon(player, 0);
+            }
+
+            if (isPistolEquipped)
+            {
+                _pistolTriggerBufferTimer = 0f;
             }
         }
 
@@ -1702,13 +2013,27 @@ public sealed partial class Game
             player.Health,
             player.IsAlive,
             player.Armor,
+            player.MaxHealth,
             player.Weapon.Name,
             player.CurrentWeapon.Level,
             player.SelectedWeaponIndex,
             GetSelectedHotbarRawIndex(),
+            player.CurrentWeapon.AmmoInClip,
+            player.CurrentWeapon.AmmoReserve,
+            player.Credits,
+            player.Scrap,
+            player.BarricadeKits,
+            player.Kills,
+            player.TurretCharges,
+            player.MaxTurretCharges,
+            player.Adrenaline,
+            player.MaxAdrenaline,
             player.LastMoveInput,
             player.MoveBlend,
+            player.FireTimer,
+            player.WeaponStateSequence,
             player.IsReloading,
+            player.ReloadTimer,
             player.IsOverdriveActive,
             player.ShootAnimation,
             player.PickupAnimation,
@@ -1824,15 +2149,180 @@ public sealed partial class Game
         PlayWeaponShotSound(player.Position, muzzle, weapon);
     }
 
+    private int GetProjectileSweepSteps(float travel, float radius)
+    {
+        return Math.Max(1, (int)MathF.Ceiling(travel / Math.Max(1.25f, radius * 0.45f)));
+    }
+
+    private bool ClientBulletWouldImpact(Bullet bullet, Vector2 position)
+    {
+        if (Map.CollidesCircle(position, bullet.Radius))
+        {
+            return true;
+        }
+
+        if (bullet.FromPlayer)
+        {
+            foreach (Zombie enemy in _zombies)
+            {
+                if (enemy.IsAlive && Phys.CirclesOverlap(position, bullet.Radius, enemy.Position, enemy.Radius))
+                {
+                    return true;
+                }
+            }
+
+            foreach (LootCrate crate in _lootCrates)
+            {
+                if (!crate.Destroyed && Phys.CirclesOverlap(position, bullet.Radius, crate.Position, crate.Radius))
+                {
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            foreach (Player player in _players)
+            {
+                if (player.IsAlive && Phys.CirclesOverlap(position, bullet.Radius, player.Position, player.Radius))
+                {
+                    return true;
+                }
+            }
+
+            foreach (RemotePlayerView remote in _remotePlayers)
+            {
+                if (remote.IsAlive && Phys.CirclesOverlap(position, bullet.Radius, remote.TargetPosition, 18f))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private void ConsumeNetworkFxEvents(NetWorldState world)
+    {
+        if (_network.Mode != NetMode.Client || _players.Count == 0)
+        {
+            return;
+        }
+
+        Vector2 listener = Player.Position;
+        foreach (NetFxEventState fx in world.FxEvents)
+        {
+            int fxId = Math.Max(1, fx.Id);
+            if (!_clientSeenFxEventIds.Add(fxId))
+            {
+                continue;
+            }
+
+            Vector2 position = new Vector2(fx.X, fx.Y);
+            Vector2 velocity = new Vector2(fx.VelocityX, fx.VelocityY);
+            Color tint = Color.FromArgb(fx.TintArgb);
+            switch ((NetworkFxEventType)fx.TypeId)
+            {
+                case NetworkFxEventType.Ricochet:
+                    SpawnRicochetBurst(position, velocity, fx.Flag);
+                    break;
+                case NetworkFxEventType.ZombieBlood:
+                    SpawnZombieBloodBurst(position, velocity, tint, fx.Flag);
+                    _sound.PlayWorld(WorldSound.Hit, listener, position, 500f, true);
+                    break;
+                case NetworkFxEventType.CrateImpact:
+                    SpawnCrateImpactBurst(position, Math.Max(1, fx.Value), fx.Flag);
+                    _sound.PlayWorld(fx.Flag ? WorldSound.CrateBreak : WorldSound.CrateHit, listener, position, 480f, true);
+                    break;
+                case NetworkFxEventType.Explosion:
+                    SpawnExplosionBurst(position, fx.Radius, tint);
+                    _sound.PlayWorld(WorldSound.Explosion, listener, position, 900f, true);
+                    break;
+            }
+        }
+
+        if (_clientSeenFxEventIds.Count > 512)
+        {
+            _clientSeenFxEventIds.Clear();
+            foreach (NetFxEventState fx in world.FxEvents)
+            {
+                _clientSeenFxEventIds.Add(Math.Max(1, fx.Id));
+            }
+        }
+    }
+
     private void UpdateClientPredictedBullets(float dt)
     {
         for (int i = _clientPredictedBullets.Count - 1; i >= 0; i--)
         {
             Bullet bullet = _clientPredictedBullets[i];
             bullet.Lifetime -= dt;
-            bullet.Position += bullet.Velocity * dt;
 
-            if (bullet.Lifetime <= 0f || Map.CollidesCircle(bullet.Position, bullet.Radius))
+            if (bullet.Lifetime <= 0f)
+            {
+                _clientPredictedBullets.RemoveAt(i);
+                continue;
+            }
+
+            Vector2 start = bullet.Position;
+            Vector2 end = start + bullet.Velocity * dt;
+            float travel = Vector2.Distance(start, end);
+            int steps = GetProjectileSweepSteps(travel, bullet.Radius);
+            bool remove = false;
+
+            for (int step = 1; step <= steps; step++)
+            {
+                float t = step / (float)steps;
+                bullet.Position = Vector2.Lerp(start, end, t);
+
+                if (Map.CollidesCircle(bullet.Position, bullet.Radius))
+                {
+                    SpawnRicochetBurst(bullet.Position, bullet.Velocity, bullet.Damage >= 18);
+                    remove = true;
+                    break;
+                }
+
+                foreach (Zombie enemy in _zombies)
+                {
+                    if (!enemy.IsAlive)
+                    {
+                        continue;
+                    }
+
+                    if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, enemy.Position, enemy.Radius))
+                    {
+                        SpawnZombieBloodBurst(enemy.Position - Phys.NormalizeSafe(bullet.Velocity) * enemy.Radius * 0.3f, bullet.Velocity, enemy.Tint, false);
+                        remove = true;
+                        break;
+                    }
+                }
+
+                if (remove)
+                {
+                    break;
+                }
+
+                foreach (LootCrate crate in _lootCrates)
+                {
+                    if (crate.Destroyed)
+                    {
+                        continue;
+                    }
+
+                    if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, crate.Position, crate.Radius))
+                    {
+                        SpawnCrateImpactBurst(crate.Position, bullet.Damage, false);
+                        remove = true;
+                        break;
+                    }
+                }
+
+                if (remove)
+                {
+                    break;
+                }
+            }
+
+            if (remove)
             {
                 _clientPredictedBullets.RemoveAt(i);
             }
@@ -1881,7 +2371,67 @@ public sealed partial class Game
         }
     }
 
-    private void UpdateNetworkGhosts()
+    private void UpdateClientPredictedGrenades(float dt)
+    {
+        for (int i = _clientPredictedGrenades.Count - 1; i >= 0; i--)
+        {
+            Grenade grenade = _clientPredictedGrenades[i];
+            grenade.Lifetime -= dt;
+            Vector2 desired = grenade.Position + grenade.Velocity * dt;
+            Vector2 resolved = Phys.ResolveCircleVsWorld(grenade.Position, desired, grenade.Radius, Map);
+            bool hitWorld = Vector2.DistanceSquared(resolved, desired) > 1f;
+            grenade.Position = resolved;
+            grenade.Velocity *= 0.982f;
+
+            if (grenade.Lifetime <= 0f || hitWorld)
+            {
+                SpawnExplosionBurst(grenade.Position, grenade.ExplosionRadius, grenade.Tint);
+                _clientPredictedGrenades.RemoveAt(i);
+            }
+        }
+    }
+
+    private void ReconcileClientPredictedGrenades()
+    {
+        if (_network.Mode != NetMode.Client || _clientPredictedGrenades.Count == 0)
+        {
+            return;
+        }
+
+        for (int i = _clientPredictedGrenades.Count - 1; i >= 0; i--)
+        {
+            Grenade predicted = _clientPredictedGrenades[i];
+            bool matched = false;
+
+            for (int j = 0; j < _grenades.Count; j++)
+            {
+                Grenade authoritative = _grenades[j];
+                if (authoritative.OwnerPlayerIndex != predicted.OwnerPlayerIndex)
+                {
+                    continue;
+                }
+
+                float radius = Math.Max(28f, authoritative.Radius + predicted.Radius + authoritative.Velocity.Length() * 0.07f);
+                if (Vector2.DistanceSquared(predicted.Position, authoritative.Position) <= radius * radius)
+                {
+                    matched = true;
+                    break;
+                }
+            }
+
+            if (matched)
+            {
+                _clientPredictedGrenades.RemoveAt(i);
+            }
+        }
+
+        if (_clientPredictedGrenades.Count > 16)
+        {
+            _clientPredictedGrenades.RemoveRange(0, _clientPredictedGrenades.Count - 16);
+        }
+    }
+
+    private void UpdateNetworkGhosts(float dt)
     {
         _remotePlayers.Clear();
         HashSet<int> seen = new HashSet<int>();
@@ -1902,13 +2452,37 @@ public sealed partial class Game
                 ApplyRemoteClientVisualActions(remote);
             }
 
+            float leadSeconds = Math.Clamp((_network.SnapshotAgeMs + _network.PingMs * 0.55f + 14f) / 1000f, 0f, 0.18f);
+            float moveSpeed = 260f * (remote.IsOverdriveActive ? 1.18f : 1f);
+            Vector2 moveDir = Phys.NormalizeSafe(remote.MoveInput);
+            Vector2 predictedTarget = remote.Position + moveDir * moveSpeed * Math.Clamp(remote.MoveBlend, 0f, 1f) * leadSeconds;
+            if (moveDir.LengthSquared() > 0.0001f && !Map.CollidesCircle(predictedTarget, 18f))
+            {
+                remote.Position = predictedTarget;
+            }
+
             if (!_remotePlayerSmoothing.TryGetValue(remote.PlayerId, out Vector2 smoothed))
             {
                 smoothed = remote.Position;
             }
 
             remote.TargetPosition = remote.Position;
-            smoothed = Vector2.Lerp(smoothed, remote.Position, 0.28f);
+            float distanceSq = Vector2.DistanceSquared(smoothed, remote.TargetPosition);
+            if (distanceSq > 240f * 240f)
+            {
+                smoothed = remote.TargetPosition;
+            }
+            else
+            {
+                float smoothing = 1f - MathF.Exp(-Math.Max(0.001f, 18f * dt));
+                if (distanceSq > 72f * 72f)
+                {
+                    smoothing = MathF.Min(1f, smoothing * 1.65f);
+                }
+
+                smoothed = Vector2.Lerp(smoothed, remote.TargetPosition, smoothing);
+            }
+
             _remotePlayerSmoothing[remote.PlayerId] = smoothed;
             remote.Position = smoothed;
             _remotePlayers.Add(remote);
@@ -2008,6 +2582,12 @@ public sealed partial class Game
             FireRemoteWeaponPredicted(remote);
         }
 
+        int grenadeDelta = Math.Clamp(remote.GrenadeSequence - tracker.GrenadeSequence, 0, 2);
+        for (int i = 0; i < grenadeDelta; i++)
+        {
+            SpawnRemotePredictedGrenade(remote);
+        }
+
         tracker.ShotSequence = remote.ShotSequence;
         tracker.GrenadeSequence = remote.GrenadeSequence;
         tracker.TurretSequence = remote.TurretSequence;
@@ -2019,7 +2599,14 @@ public sealed partial class Game
     private void SpawnRemoteGrenade(RemotePlayerView remote)
     {
         Vector2 dir = Phys.FromAngle(remote.AimAngle);
-        _grenades.Add(new Grenade(remote.TargetPosition + dir * 20f, dir * 500f, 7f, 0.9f, 76, 120f, remote.PlayerId, Color.Orange));
+        _grenades.Add(new Grenade(remote.TargetPosition + dir * 20f, dir * 500f, 7f, 0.9f, 76, 120f, remote.PlayerId, Color.Orange, AllocateGrenadeNetworkId()));
+    }
+
+    private void SpawnRemotePredictedGrenade(RemotePlayerView remote)
+    {
+        Vector2 dir = Phys.FromAngle(remote.AimAngle);
+        _clientPredictedGrenades.Add(new Grenade(remote.TargetPosition + dir * 20f, dir * 500f, 7f, 0.9f, 76, 120f, remote.PlayerId, Color.FromArgb(188, Color.Orange)));
+        _sound.PlayWorld(WorldSound.Explosion, Player.Position, remote.TargetPosition + dir * 40f, 120f, false);
     }
 
     private void SpawnRemoteTurret(RemotePlayerView remote)
@@ -2062,8 +2649,8 @@ public sealed partial class Game
         }
 
         List<Zombie> syncedZombies = new List<Zombie>(world.Zombies.Count);
-        float zombieLeadSeconds = Math.Clamp((_network.WorldSnapshotAgeMs + _network.PingMs * 0.35f) / 1000f, 0f, 0.45f);
-        float zombieLerp = 1f - MathF.Exp(-Math.Max(0.001f, 10f * dt));
+        float zombieLeadSeconds = Math.Clamp((_network.WorldSnapshotAgeMs + _network.PingMs * 0.28f) / 1000f, 0f, 0.32f);
+        float zombieLerp = 1f - MathF.Exp(-Math.Max(0.001f, 14f * dt));
 
         foreach (NetZombieState state in world.Zombies)
         {
@@ -2128,7 +2715,10 @@ public sealed partial class Game
             _turrets.Add(turret);
         }
 
+        ConsumeNetworkFxEvents(world);
         SyncClientLootCrateAudio(world);
+        SyncClientZombieVisualEffects(world);
+        SyncClientExplosionEffects(world);
 
         _lootCrates.Clear();
         foreach (NetLootCrateState state in world.Crates)
@@ -2144,7 +2734,7 @@ public sealed partial class Game
             _lootCrates.Add(crate);
         }
 
-        float bulletLeadSeconds = Math.Clamp((_network.WorldSnapshotAgeMs + _network.PingMs * 0.5f) / 1000f, 0f, 0.35f);
+        float bulletLeadSeconds = Math.Clamp((_network.WorldSnapshotAgeMs + _network.PingMs * 0.08f) / 1000f, 0f, 0.05f);
         _bullets.Clear();
         foreach (NetBulletState state in world.Bullets)
         {
@@ -2155,14 +2745,8 @@ public sealed partial class Game
                 continue;
             }
 
-            Vector2 position = new Vector2(state.X, state.Y) + velocity * bulletLeadSeconds;
-            if (Map.CollidesCircle(position, state.Radius))
-            {
-                continue;
-            }
-
-            _bullets.Add(new Bullet(
-                position,
+            Bullet bullet = new Bullet(
+                new Vector2(state.X, state.Y),
                 velocity,
                 state.Radius,
                 lifetime,
@@ -2170,32 +2754,109 @@ public sealed partial class Game
                 state.FromPlayer,
                 state.OwnerPlayerId,
                 Color.FromArgb(state.TintArgb),
-                state.SourceWeaponName));
+                state.SourceWeaponName);
+
+            Vector2 start = bullet.Position;
+            Vector2 end = start + velocity * bulletLeadSeconds;
+            float travel = Vector2.Distance(start, end);
+            int steps = GetProjectileSweepSteps(travel, bullet.Radius);
+            Vector2 clipped = start;
+            bool blocked = false;
+            for (int step = 1; step <= steps; step++)
+            {
+                float t = step / (float)steps;
+                Vector2 sample = Vector2.Lerp(start, end, t);
+                if (ClientBulletWouldImpact(bullet, sample))
+                {
+                    blocked = true;
+                    break;
+                }
+
+                clipped = sample;
+            }
+
+            bullet.Position = blocked ? clipped : end;
+            if (ClientBulletWouldImpact(bullet, bullet.Position))
+            {
+                continue;
+            }
+
+            _bullets.Add(bullet);
         }
 
         ReconcileClientPredictedBullets();
 
-        _grenades.Clear();
+        Dictionary<int, Grenade> grenadesById = new Dictionary<int, Grenade>(_grenades.Count);
+        for (int i = 0; i < _grenades.Count; i++)
+        {
+            Grenade existing = _grenades[i];
+            if (existing.NetworkId > 0)
+            {
+                grenadesById[existing.NetworkId] = existing;
+            }
+        }
+
+        List<Grenade> syncedGrenades = new List<Grenade>(world.Grenades.Count);
+        float grenadeLeadSeconds = Math.Clamp((_network.WorldSnapshotAgeMs + _network.PingMs * 0.32f) / 1000f, 0f, 0.20f);
+        float grenadeLerp = 1f - MathF.Exp(-Math.Max(0.001f, 16f * dt));
         foreach (NetGrenadeState state in world.Grenades)
         {
-            _grenades.Add(new Grenade(
-                new Vector2(state.X, state.Y),
-                new Vector2(state.VelocityX, state.VelocityY),
-                state.Radius,
-                state.Lifetime,
-                state.Damage,
-                state.ExplosionRadius,
-                state.OwnerPlayerId,
-                Color.FromArgb(state.TintArgb)));
+            int grenadeId = Math.Max(1, state.Id);
+            if (!grenadesById.TryGetValue(grenadeId, out Grenade? grenade))
+            {
+                grenade = new Grenade(
+                    new Vector2(state.X, state.Y),
+                    new Vector2(state.VelocityX, state.VelocityY),
+                    state.Radius,
+                    state.Lifetime,
+                    state.Damage,
+                    state.ExplosionRadius,
+                    state.OwnerPlayerId,
+                    Color.FromArgb(state.TintArgb),
+                    grenadeId);
+            }
+
+            Vector2 authoritativePosition = new Vector2(state.X, state.Y);
+            Vector2 velocity = new Vector2(state.VelocityX, state.VelocityY);
+            Vector2 predictedPosition = authoritativePosition + velocity * grenadeLeadSeconds;
+            if (Map.CollidesCircle(predictedPosition, state.Radius))
+            {
+                predictedPosition = authoritativePosition;
+            }
+
+            float snapDistanceSq = Vector2.DistanceSquared(grenade.Position, authoritativePosition);
+            if (snapDistanceSq > 180f * 180f)
+            {
+                grenade.Position = authoritativePosition;
+            }
+            else
+            {
+                grenade.Position = Vector2.Lerp(grenade.Position, predictedPosition, grenadeLerp);
+            }
+
+            grenade.NetworkId = grenadeId;
+            grenade.Velocity = velocity;
+            grenade.Radius = state.Radius;
+            grenade.Lifetime = state.Lifetime;
+            grenade.Damage = state.Damage;
+            grenade.ExplosionRadius = state.ExplosionRadius;
+            grenade.OwnerPlayerIndex = state.OwnerPlayerId;
+            grenade.Tint = Color.FromArgb(state.TintArgb);
+            syncedGrenades.Add(grenade);
         }
+
+        _grenades.Clear();
+        _grenades.AddRange(syncedGrenades);
+        ReconcileClientPredictedGrenades();
 
         _explosions.Clear();
         foreach (NetExplosionState state in world.Explosions)
         {
-            Explosion explosion = new Explosion(new Vector2(state.X, state.Y), state.Radius, Math.Max(0.05f, state.MaxLifetime), Color.FromArgb(state.TintArgb))
+            Explosion explosion = new Explosion(new Vector2(state.X, state.Y), state.Radius, Math.Max(0.05f, state.MaxLifetime), Color.FromArgb(state.TintArgb), Math.Max(1, state.Id))
             {
                 Lifetime = state.Lifetime,
-                MaxLifetime = Math.Max(0.05f, state.MaxLifetime)
+                MaxLifetime = Math.Max(0.05f, state.MaxLifetime),
+                NetworkId = Math.Max(1, state.Id)
             };
             _explosions.Add(explosion);
         }
@@ -2217,11 +2878,15 @@ public sealed partial class Game
         }
 
         Player player = Player;
-        player.Health = Math.Max(0, state.Health);
-        player.Armor = Math.Max(0, state.Armor);
-        if (!state.IsAlive)
+        player.ApplyNetworkSnapshot(state);
+
+        if (state.SelectedHotbarRawIndex >= 0 && state.SelectedHotbarRawIndex < _inventoryLayout.Length)
         {
-            player.Health = 0;
+            int displayIndex = FindInventoryDisplayIndex(state.SelectedHotbarRawIndex);
+            if (displayIndex >= 0 && displayIndex < 9)
+            {
+                SetSelectedHotbarIndex(displayIndex);
+            }
         }
     }
 
@@ -2274,7 +2939,7 @@ public sealed partial class Game
                 }
 
                 scrap.Collected = true;
-                _network.ApplyRemotePlayerPickup(remote.PlayerId, PickupType.Credits, scrap.ScrapAmount);
+                _network.ApplyRemotePlayerScrap(remote.PlayerId, scrap.ScrapAmount);
                 _scrapPiles.RemoveAt(i);
             }
         }
@@ -2295,7 +2960,8 @@ public sealed partial class Game
                 continue;
             }
 
-            float dist = Vector2.DistanceSquared(player.Position, from);
+            float visibility = Map.GetVisibilityMultiplier(player.Position);
+            float dist = Vector2.DistanceSquared(player.Position, from) / MathF.Max(0.12f, visibility * visibility);
             if (dist < bestDist)
             {
                 bestDist = dist;
@@ -2315,7 +2981,8 @@ public sealed partial class Game
                     continue;
                 }
 
-                float dist = Vector2.DistanceSquared(remote.TargetPosition, from);
+                float visibility = Map.GetVisibilityMultiplier(remote.TargetPosition);
+                float dist = Vector2.DistanceSquared(remote.TargetPosition, from) / MathF.Max(0.12f, visibility * visibility);
                 if (dist < bestDist)
                 {
                     bestDist = dist;
@@ -2496,8 +3163,10 @@ public sealed partial class Game
 
     private void Explode(Vector2 position, float radius, int damage, bool fromPlayer, Color tint)
     {
-        _explosions.Add(new Explosion(position, radius, 0.35f, tint));
+        _explosions.Add(new Explosion(position, radius, 0.35f, tint, AllocateExplosionNetworkId()));
         _sound.PlayWorld(WorldSound.Explosion, Player.Position, position, 900f, true);
+        SpawnExplosionBurst(position, radius, tint);
+        QueueNetworkFxEvent(NetworkFxEventType.Explosion, position, Vector2.Zero, radius, tint, damage, fromPlayer, 1.1f);
 
         if (fromPlayer)
         {
@@ -2585,116 +3254,145 @@ public sealed partial class Game
         {
             Bullet bullet = _bullets[i];
             bullet.Lifetime -= dt;
-            bullet.Position += bullet.Velocity * dt;
 
-            if (bullet.Lifetime <= 0f || Map.CollidesCircle(bullet.Position, bullet.Radius))
+            if (bullet.Lifetime <= 0f)
             {
                 _bullets.RemoveAt(i);
                 continue;
             }
 
-            if (bullet.FromPlayer)
+            Vector2 start = bullet.Position;
+            Vector2 end = start + bullet.Velocity * dt;
+            float travel = Vector2.Distance(start, end);
+            int steps = GetProjectileSweepSteps(travel, bullet.Radius);
+            bool remove = false;
+
+            for (int step = 1; step <= steps; step++)
             {
-                bool hit = false;
-                foreach (Zombie enemy in _zombies)
+                float t = step / (float)steps;
+                bullet.Position = Vector2.Lerp(start, end, t);
+
+                if (Map.CollidesCircle(bullet.Position, bullet.Radius))
                 {
-                    if (!enemy.IsAlive)
-                    {
-                        continue;
-                    }
+                    SpawnRicochetBurst(bullet.Position, bullet.Velocity, bullet.Damage >= 18);
+                    QueueNetworkFxEvent(NetworkFxEventType.Ricochet, bullet.Position, bullet.Velocity, bullet.Radius, bullet.Tint, bullet.Damage, bullet.Damage >= 18);
+                    remove = true;
+                    break;
+                }
 
-                    if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, enemy.Position, enemy.Radius))
+                if (bullet.FromPlayer)
+                {
+                    bool hitTarget = false;
+                    foreach (Zombie enemy in _zombies)
                     {
-                        enemy.Health -= bullet.Damage;
-                        ApplyZombieImpact(enemy, bullet.Velocity, bullet.SourceWeaponName);
-                        _sound.PlayWorld(WorldSound.Hit, Player.Position, enemy.Position, 500f, true);
-
-                        if (bullet.OwnerPlayerIndex == 0 && !string.IsNullOrWhiteSpace(bullet.SourceWeaponName))
+                        if (!enemy.IsAlive)
                         {
-                            if (Player.AwardWeaponExperience(bullet.SourceWeaponName, 5))
+                            continue;
+                        }
+
+                        if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, enemy.Position, enemy.Radius))
+                        {
+                            enemy.Health -= bullet.Damage;
+                            ApplyZombieImpact(enemy, bullet.Velocity, bullet.SourceWeaponName);
+                            _sound.PlayWorld(WorldSound.Hit, Player.Position, enemy.Position, 500f, true);
+                            Vector2 bloodPosition = enemy.Position - Phys.NormalizeSafe(bullet.Velocity) * enemy.Radius * 0.3f;
+                            SpawnZombieBloodBurst(bloodPosition, bullet.Velocity, enemy.Tint, enemy.Health <= 0);
+                            QueueNetworkFxEvent(NetworkFxEventType.ZombieBlood, bloodPosition, bullet.Velocity, enemy.Radius, enemy.Tint, bullet.Damage, enemy.Health <= 0);
+
+                            if (bullet.OwnerPlayerIndex == 0 && !string.IsNullOrWhiteSpace(bullet.SourceWeaponName))
                             {
-                                WeaponState? state = Player.GetWeaponState(bullet.SourceWeaponName);
-                                if (state is not null)
+                                if (Player.AwardWeaponExperience(bullet.SourceWeaponName, 5))
                                 {
-                                    SetAnnouncement($"{state.Definition.Name} level {state.Level}", 0.9f);
+                                    WeaponState? state = Player.GetWeaponState(bullet.SourceWeaponName);
+                                    if (state is not null)
+                                    {
+                                        SetAnnouncement($"{state.Definition.Name} level {state.Level}", 0.9f);
+                                    }
                                 }
                             }
-                        }
 
-                        if (enemy.Health <= 0)
+                            if (enemy.Health <= 0)
+                            {
+                                OnZombieKilled(enemy, bullet.OwnerPlayerIndex, bullet.SourceWeaponName);
+                            }
+
+                            hitTarget = true;
+                            break;
+                        }
+                    }
+
+                    if (!hitTarget)
+                    {
+                        foreach (LootCrate crate in _lootCrates)
                         {
-                            OnZombieKilled(enemy, bullet.OwnerPlayerIndex, bullet.SourceWeaponName);
-                        }
+                            if (crate.Destroyed)
+                            {
+                                continue;
+                            }
 
-                        hit = true;
+                            if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, crate.Position, crate.Radius))
+                            {
+                                DamageLootCrate(crate, bullet.Damage);
+                                hitTarget = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (hitTarget)
+                    {
+                        remove = true;
                         break;
                     }
                 }
-
-                if (!hit)
+                else
                 {
-                    foreach (LootCrate crate in _lootCrates)
+                    bool hitTarget = false;
+                    foreach (Player player in _players)
                     {
-                        if (crate.Destroyed)
+                        if (!player.IsAlive)
                         {
                             continue;
                         }
 
-                        if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, crate.Position, crate.Radius))
+                        if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, player.Position, player.Radius))
                         {
-                            DamageLootCrate(crate, bullet.Damage);
-                            hit = true;
+                            player.TakeDamage(bullet.Damage);
+                            TriggerPlayerHitFeedback(bullet.Damage, bullet.Position);
+                            hitTarget = true;
                             break;
                         }
                     }
-                }
 
-                if (hit)
-                {
-                    _bullets.RemoveAt(i);
+                    if (!hitTarget && _network.Mode == NetMode.Host)
+                    {
+                        foreach (RemotePlayerView remote in _remotePlayers)
+                        {
+                            if (!remote.IsAlive)
+                            {
+                                continue;
+                            }
+
+                            if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, remote.TargetPosition, 18f))
+                            {
+                                _network.ApplyRemotePlayerDamage(remote.PlayerId, bullet.Damage);
+                                hitTarget = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (hitTarget)
+                    {
+                        remove = true;
+                        break;
+                    }
                 }
             }
-            else
+
+            if (remove)
             {
-                bool hit = false;
-                foreach (Player player in _players)
-                {
-                    if (!player.IsAlive)
-                    {
-                        continue;
-                    }
-
-                    if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, player.Position, player.Radius))
-                    {
-                        player.TakeDamage(bullet.Damage);
-                        TriggerPlayerHitFeedback(bullet.Damage, bullet.Position);
-                        hit = true;
-                        break;
-                    }
-                }
-
-                if (!hit && _network.Mode == NetMode.Host)
-                {
-                    foreach (RemotePlayerView remote in _remotePlayers)
-                    {
-                        if (!remote.IsAlive)
-                        {
-                            continue;
-                        }
-
-                        if (Phys.CirclesOverlap(bullet.Position, bullet.Radius, remote.TargetPosition, 18f))
-                        {
-                            _network.ApplyRemotePlayerDamage(remote.PlayerId, bullet.Damage);
-                            hit = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (hit)
-                {
-                    _bullets.RemoveAt(i);
-                }
+                _bullets.RemoveAt(i);
             }
         }
     }
@@ -2710,9 +3408,17 @@ public sealed partial class Game
         int reward = enemy.RewardScore;
         enemy.RewardScore = -1;
         Player player = Player;
-        player.Kills++;
-        player.Credits += 2 + Math.Max(0, reward / 10);
-        player.AddAdrenaline(8f + reward * 0.1f);
+        if (ownerPlayerIndex <= 0)
+        {
+            player.Kills++;
+            player.Credits += 2 + Math.Max(0, reward / 10);
+            player.AddAdrenaline(8f + reward * 0.1f);
+        }
+        else if (_network.Mode == NetMode.Host)
+        {
+            _network.AwardRemotePlayerKill(ownerPlayerIndex, reward);
+        }
+
         _score += reward;
 
         if (ownerPlayerIndex == 0 && !string.IsNullOrWhiteSpace(sourceWeaponName))
@@ -2793,7 +3499,7 @@ public sealed partial class Game
             }
 
             Vector2 desiredDir = Phys.NormalizeSafe(enemy.PathWaypoint - enemy.Position);
-            float desiredSpeed = enemy.EffectiveMoveSpeed;
+            float desiredSpeed = enemy.EffectiveMoveSpeed * Map.GetSurfaceSpeedMultiplier(enemy.Position);
             float distanceToTargetSq = Vector2.DistanceSquared(enemy.Position, targetPos);
 
             if (enemy.IsRanged)
@@ -2868,7 +3574,7 @@ public sealed partial class Game
                 for (int s = 0; s < 2; s++)
                 {
                     Vector2 spawn = enemy.Position + new Vector2(_rng.Next(-42, 43), _rng.Next(-42, 43));
-                    if (!Map.CollidesCircle(spawn, 14f))
+                    if (Map.IsBuildableCircle(spawn, 14f))
                     {
                         _zombies.Add(CreateTrackedZombie(ZombieKind.Runner, spawn, Math.Max(1, _waveNumber - 1)));
                     }
@@ -2881,7 +3587,7 @@ public sealed partial class Game
                 for (int s = 0; s < 3; s++)
                 {
                     Vector2 spawn = enemy.Position + new Vector2(_rng.Next(-56, 57), _rng.Next(-56, 57));
-                    if (!Map.CollidesCircle(spawn, 16f))
+                    if (Map.IsBuildableCircle(spawn, 16f))
                     {
                         _zombies.Add(CreateTrackedZombie(ZombieKind.Runner, spawn, _waveNumber));
                     }
@@ -3145,6 +3851,7 @@ public sealed partial class Game
         DrawSupportPlacementPreview(g, clientSize);
         DrawPlayers(g);
         DrawRemotePlayers(g);
+        DrawWorldParticles(g);
 
         g.ResetTransform();
     }
@@ -3157,8 +3864,13 @@ public sealed partial class Game
         using LinearGradientBrush backdrop = new LinearGradientBrush(view, top, bottom, LinearGradientMode.Vertical);
         g.FillRectangle(backdrop, view);
 
+        foreach ((RectangleF rect, int floorType) in Map.GetGroundTiles(view))
+        {
+            DrawGroundTile(g, rect, floorType, darkness);
+        }
+
         int grid = TileMap.TileSize;
-        Color gridColor = Mix(Color.FromArgb(36, 90, 112, 132), Color.FromArgb(26, 70, 90, 130), darkness);
+        Color gridColor = Mix(Color.FromArgb(18, 76, 96, 112), Color.FromArgb(12, 52, 68, 98), darkness);
         using Pen pen = new Pen(gridColor);
         for (int x = view.Left / grid * grid; x < view.Right + grid; x += grid)
         {
@@ -3170,13 +3882,222 @@ public sealed partial class Game
             g.DrawLine(pen, view.Left, y, view.Right, y);
         }
 
-        int pulseAlpha = (int)(18f + (1f - darkness) * 10f + 10f * (0.5f + 0.5f * MathF.Sin(_backgroundPulse * 1.4f)));
+        int pulseAlpha = (int)(16f + (1f - darkness) * 8f + 10f * (0.5f + 0.5f * MathF.Sin(_backgroundPulse * 1.4f)));
         Color pulseColor = _dayNight.IsNight ? Color.FromArgb(pulseAlpha, 110, 126, 255) : Color.FromArgb(pulseAlpha, 80, 220, 255);
         using Pen pulse = new Pen(pulseColor, 1f);
         for (int y = view.Top - (view.Top % (grid * 4)); y < view.Bottom + grid * 4; y += grid * 4)
         {
             g.DrawLine(pulse, view.Left, y, view.Right, y);
         }
+    }
+
+    private void DrawGroundTile(Graphics g, RectangleF rect, int floorType, float darkness)
+    {
+        switch (floorType)
+        {
+            case TileMap.FloorWater:
+                DrawWaterTile(g, rect, darkness);
+                break;
+            case TileMap.FloorShore:
+                DrawShoreTile(g, rect, darkness);
+                break;
+            default:
+                Color color = floorType == TileMap.FloorGrass
+                    ? Mix(Color.FromArgb(44, 92, 58), Color.FromArgb(18, 36, 24), darkness)
+                    : Mix(Color.FromArgb(74, 78, 88), Color.FromArgb(26, 30, 36), darkness);
+                using (SolidBrush floorBrush = new SolidBrush(Color.FromArgb(112, color)))
+                {
+                    g.FillRectangle(floorBrush, rect);
+                }
+                break;
+        }
+    }
+
+    private void DrawShoreTile(Graphics g, RectangleF rect, float darkness)
+    {
+        int tx = (int)(rect.X / TileMap.TileSize);
+        int ty = (int)(rect.Y / TileMap.TileSize);
+        Color top = Mix(Color.FromArgb(126, 122, 86), Color.FromArgb(54, 52, 38), darkness);
+        Color bottom = Mix(Color.FromArgb(88, 98, 68), Color.FromArgb(24, 28, 18), darkness);
+        using (LinearGradientBrush fill = new LinearGradientBrush(rect, Color.FromArgb(148, top), Color.FromArgb(168, bottom), LinearGradientMode.Vertical))
+        {
+            g.FillRectangle(fill, rect);
+        }
+
+        float phase = _backgroundPulse * 1.6f + tx * 0.85f + ty * 0.45f;
+        using Pen reedPen = new Pen(Color.FromArgb((int)(34f + (1f - darkness) * 22f), 194, 206, 158), 1f);
+        for (int i = 0; i < 3; i++)
+        {
+            float x = rect.Left + 8f + i * 11f + MathF.Sin(phase + i * 1.3f) * 2f;
+            float y1 = rect.Bottom - 6f;
+            float y2 = rect.Bottom - 15f - i * 1.5f;
+            g.DrawLine(reedPen, x, y1, x + MathF.Sin(phase * 1.3f + i) * 1.8f, y2);
+        }
+
+        if (Map.GetFloorValue(tx, ty - 1) == TileMap.FloorWater || Map.GetFloorValue(tx - 1, ty) == TileMap.FloorWater || Map.GetFloorValue(tx + 1, ty) == TileMap.FloorWater || Map.GetFloorValue(tx, ty + 1) == TileMap.FloorWater)
+        {
+            using Pen edge = new Pen(Color.FromArgb((int)(30f + (1f - darkness) * 20f), 230, 238, 214), 1f);
+            g.DrawRectangle(edge, rect.X + 2f, rect.Y + 2f, rect.Width - 4f, rect.Height - 4f);
+        }
+    }
+
+    private void DrawWaterTile(Graphics g, RectangleF rect, float darkness)
+    {
+        int tx = (int)(rect.X / TileMap.TileSize);
+        int ty = (int)(rect.Y / TileMap.TileSize);
+        Color shallowTop = Mix(Color.FromArgb(54, 146, 190), Color.FromArgb(18, 64, 92), darkness);
+        Color deepBottom = Mix(Color.FromArgb(12, 78, 120), Color.FromArgb(4, 20, 38), darkness);
+        using (LinearGradientBrush fill = new LinearGradientBrush(rect, Color.FromArgb(176, shallowTop), Color.FromArgb(198, deepBottom), LinearGradientMode.Vertical))
+        {
+            g.FillRectangle(fill, rect);
+        }
+
+        float phase = _backgroundPulse * 2.2f + tx * 0.8f + ty * 0.52f;
+        using (SolidBrush glow = new SolidBrush(Color.FromArgb((int)(20f + (1f - darkness) * 16f), 120, 220, 255)))
+        {
+            float glowX = rect.Left + rect.Width * (0.26f + 0.16f * MathF.Sin(phase * 0.7f));
+            float glowY = rect.Top + rect.Height * (0.18f + 0.08f * MathF.Cos(phase * 0.9f));
+            g.FillEllipse(glow, glowX, glowY, rect.Width * 0.34f, rect.Height * 0.16f);
+        }
+
+        using (Pen ripple = new Pen(Color.FromArgb((int)(28f + (1f - darkness) * 24f), 224, 246, 255), 1f))
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                float y = rect.Top + 8f + i * 10f + MathF.Sin(phase + i * 1.18f) * 2.2f;
+                float inset = 4f + MathF.Abs(MathF.Sin(phase * 0.7f + i)) * 4f;
+                g.DrawLine(ripple, rect.Left + inset, y, rect.Right - inset, y);
+            }
+        }
+
+        using Pen caustic = new Pen(Color.FromArgb((int)(14f + (1f - darkness) * 18f), 255, 255, 255), 1f);
+        g.DrawLine(caustic, rect.Left + 6f, rect.Top + 10f, rect.Right - 10f, rect.Bottom - 8f);
+        g.DrawLine(caustic, rect.Left + 12f, rect.Top + 8f, rect.Right - 6f, rect.Top + rect.Height * 0.58f);
+
+        using Pen foam = new Pen(Color.FromArgb((int)(32f + (1f - darkness) * 30f), 236, 246, 255), 1f);
+        float wave = MathF.Sin(phase * 1.4f) * 1.6f;
+        if (Map.GetFloorValue(tx, ty - 1) != TileMap.FloorWater)
+        {
+            g.DrawLine(foam, rect.Left + 4f, rect.Top + 4f + wave, rect.Right - 4f, rect.Top + 4f + wave);
+        }
+        if (Map.GetFloorValue(tx, ty + 1) != TileMap.FloorWater)
+        {
+            g.DrawLine(foam, rect.Left + 5f, rect.Bottom - 5f + wave * 0.4f, rect.Right - 5f, rect.Bottom - 5f + wave * 0.4f);
+        }
+        if (Map.GetFloorValue(tx - 1, ty) != TileMap.FloorWater)
+        {
+            g.DrawLine(foam, rect.Left + 4f + wave * 0.3f, rect.Top + 4f, rect.Left + 4f + wave * 0.3f, rect.Bottom - 4f);
+        }
+        if (Map.GetFloorValue(tx + 1, ty) != TileMap.FloorWater)
+        {
+            g.DrawLine(foam, rect.Right - 4f + wave * 0.3f, rect.Top + 4f, rect.Right - 4f + wave * 0.3f, rect.Bottom - 4f);
+        }
+    }
+
+    private bool IsDoorFrameTileValue(int value)
+    {
+        return value == TileMap.TileStoneWall || value == TileMap.TileWoodWall || value == TileMap.TileDoorClosed || value == TileMap.TileDoorOpen;
+    }
+
+    private bool IsDoorVerticalAt(int tx, int ty)
+    {
+        bool horizontalRun = IsDoorFrameTileValue(Map.GetTileValue(tx - 1, ty)) || IsDoorFrameTileValue(Map.GetTileValue(tx + 1, ty));
+        bool verticalRun = IsDoorFrameTileValue(Map.GetTileValue(tx, ty - 1)) || IsDoorFrameTileValue(Map.GetTileValue(tx, ty + 1));
+        if (horizontalRun == verticalRun)
+        {
+            return horizontalRun;
+        }
+
+        return horizontalRun;
+    }
+
+    private void DrawDoorTile(Graphics g, RectangleF rect, bool open, bool vertical)
+    {
+        using Pen frame = new Pen(Color.FromArgb(168, 86, 58, 34), 2f);
+        g.DrawRectangle(frame, rect.X + 3f, rect.Y + 3f, rect.Width - 6f, rect.Height - 6f);
+
+        RectangleF gapRect = vertical
+            ? new RectangleF(rect.X + rect.Width * 0.5f - 9f, rect.Y + 5f, 18f, rect.Height - 10f)
+            : new RectangleF(rect.X + 5f, rect.Y + rect.Height * 0.5f - 9f, rect.Width - 10f, 18f);
+
+        using SolidBrush gap = new SolidBrush(Color.FromArgb(open ? 28 : 46, 12, 12, 14));
+        g.FillRectangle(gap, gapRect);
+
+        RectangleF panelRect = open
+            ? (vertical
+                ? new RectangleF(rect.X + rect.Width - 15f, rect.Y + 7f, 9f, rect.Height - 14f)
+                : new RectangleF(rect.X + 7f, rect.Y + 6f, rect.Width - 14f, 9f))
+            : (vertical
+                ? new RectangleF(rect.X + rect.Width * 0.5f - 6f, rect.Y + 6f, 12f, rect.Height - 12f)
+                : new RectangleF(rect.X + 6f, rect.Y + rect.Height * 0.5f - 6f, rect.Width - 12f, 12f));
+
+        using LinearGradientBrush panel = new LinearGradientBrush(panelRect, Color.FromArgb(214, 194, 146, 92), Color.FromArgb(234, 116, 78, 48), vertical ? LinearGradientMode.Horizontal : LinearGradientMode.Vertical);
+        using Pen outline = new Pen(Color.FromArgb(184, 72, 48, 28), 1.2f);
+        g.FillRectangle(panel, panelRect);
+        g.DrawRectangle(outline, panelRect.X, panelRect.Y, panelRect.Width, panelRect.Height);
+
+        using Pen plank = new Pen(Color.FromArgb(88, 250, 226, 192), 1f);
+        if (vertical)
+        {
+            for (float x = panelRect.Left + 3f; x < panelRect.Right - 2f; x += 4f)
+            {
+                g.DrawLine(plank, x, panelRect.Top + 2f, x, panelRect.Bottom - 2f);
+            }
+        }
+        else
+        {
+            for (float y = panelRect.Top + 3f; y < panelRect.Bottom - 2f; y += 4f)
+            {
+                g.DrawLine(plank, panelRect.Left + 2f, y, panelRect.Right - 2f, y);
+            }
+        }
+
+        using SolidBrush handle = new SolidBrush(Color.FromArgb(210, 236, 220, 164));
+        float handleX = vertical ? panelRect.X + panelRect.Width * (open ? 0.28f : 0.72f) : panelRect.Right - 4f;
+        float handleY = vertical ? panelRect.Y + panelRect.Height * 0.54f : panelRect.Y + panelRect.Height * (open ? 0.3f : 0.72f);
+        g.FillEllipse(handle, handleX - 1.8f, handleY - 1.8f, 3.6f, 3.6f);
+    }
+
+    private void DrawBushTile(Graphics g, RectangleF rect, float darkness)
+    {
+        DrawShadow(g, new RectangleF(rect.X + 4f, rect.Y + rect.Height * 0.44f, rect.Width - 8f, rect.Height * 0.38f), 10f, 22, 2f);
+        Color low = Mix(Color.FromArgb(34, 92, 58), Color.FromArgb(14, 34, 22), darkness);
+        Color high = Mix(Color.FromArgb(68, 146, 88), Color.FromArgb(22, 62, 36), darkness);
+        using SolidBrush fillA = new SolidBrush(Color.FromArgb(214, low));
+        using SolidBrush fillB = new SolidBrush(Color.FromArgb(224, high));
+        using Pen outline = new Pen(Color.FromArgb(132, 12, 28, 18), 1f);
+
+        RectangleF left = new RectangleF(rect.X + 4f, rect.Y + rect.Height * 0.42f, rect.Width * 0.44f, rect.Height * 0.34f);
+        RectangleF center = new RectangleF(rect.X + rect.Width * 0.24f, rect.Y + rect.Height * 0.24f, rect.Width * 0.5f, rect.Height * 0.44f);
+        RectangleF right = new RectangleF(rect.Right - rect.Width * 0.42f, rect.Y + rect.Height * 0.4f, rect.Width * 0.38f, rect.Height * 0.3f);
+        g.FillEllipse(fillA, left);
+        g.FillEllipse(fillB, center);
+        g.FillEllipse(fillA, right);
+        g.DrawEllipse(outline, center);
+
+        using Pen twig = new Pen(Color.FromArgb(104, 196, 232, 198), 1f);
+        g.DrawLine(twig, rect.X + 11f, rect.Bottom - 10f, rect.X + 17f, rect.Bottom - 18f);
+        g.DrawLine(twig, rect.Right - 12f, rect.Bottom - 12f, rect.Right - 18f, rect.Bottom - 19f);
+    }
+
+    private void DrawBushCoverOverlay(Graphics g, Vector2 position, float radius)
+    {
+        if (!Map.IsConcealing(position))
+        {
+            return;
+        }
+
+        RectangleF overlay = new RectangleF(position.X - radius - 7f, position.Y - radius * 0.4f, (radius + 7f) * 2f, radius + 12f);
+        using SolidBrush leafA = new SolidBrush(Color.FromArgb(86, 42, 108, 64));
+        using SolidBrush leafB = new SolidBrush(Color.FromArgb(96, 82, 168, 106));
+        g.FillEllipse(leafA, overlay.X + 2f, overlay.Y + 6f, overlay.Width * 0.44f, overlay.Height * 0.66f);
+        g.FillEllipse(leafB, overlay.X + overlay.Width * 0.26f, overlay.Y, overlay.Width * 0.48f, overlay.Height * 0.72f);
+        g.FillEllipse(leafA, overlay.Right - overlay.Width * 0.42f, overlay.Y + 8f, overlay.Width * 0.34f, overlay.Height * 0.58f);
+    }
+
+    private int GetEntityAlpha(int alpha, Vector2 world, float concealScale = 0.72f)
+    {
+        return Map.IsConcealing(world) ? Math.Max(80, (int)(alpha * concealScale)) : alpha;
     }
 
     private void DrawTiles(Graphics g, Rectangle view)
@@ -3188,7 +4109,59 @@ public sealed partial class Game
                 continue;
             }
 
-            Color baseColor = value == 1 ? Color.FromArgb(74, 84, 96) : Color.FromArgb(132, 96, 60);
+            int tx = (int)(rect.X / TileMap.TileSize);
+            int ty = (int)(rect.Y / TileMap.TileSize);
+
+            if (value == TileMap.TileTree)
+            {
+                using SolidBrush trunk = new SolidBrush(Color.FromArgb(210, 92, 62, 38));
+                using SolidBrush canopy = new SolidBrush(Color.FromArgb(230, 52, 118, 74));
+                using Pen outline = new Pen(Color.FromArgb(150, 12, 28, 18), 1.2f);
+                RectangleF trunkRect = new RectangleF(rect.X + rect.Width * 0.36f, rect.Y + rect.Height * 0.48f, rect.Width * 0.28f, rect.Height * 0.34f);
+                RectangleF canopyRect = new RectangleF(rect.X + 4f, rect.Y + 2f, rect.Width - 8f, rect.Height * 0.7f);
+                g.FillEllipse(canopy, canopyRect);
+                g.DrawEllipse(outline, canopyRect);
+                g.FillRectangle(trunk, trunkRect);
+                continue;
+            }
+
+            if (value == TileMap.TileBush)
+            {
+                DrawBushTile(g, rect, _dayNight.Darkness);
+                continue;
+            }
+
+            if (value == TileMap.TileRock)
+            {
+                DrawShadow(g, new RectangleF(rect.X + 7f, rect.Y + rect.Height * 0.58f, rect.Width - 14f, rect.Height * 0.18f), 8f, 18, 1f);
+                using SolidBrush rockDark = new SolidBrush(Color.FromArgb(194, 82, 90, 98));
+                using SolidBrush rockLight = new SolidBrush(Color.FromArgb(214, 128, 136, 142));
+                using Pen outline = new Pen(Color.FromArgb(156, 54, 60, 68), 1.1f);
+                RectangleF left = new RectangleF(rect.X + 5f, rect.Y + 16f, rect.Width * 0.38f, rect.Height * 0.34f);
+                RectangleF mid = new RectangleF(rect.X + rect.Width * 0.28f, rect.Y + 10f, rect.Width * 0.34f, rect.Height * 0.38f);
+                RectangleF right = new RectangleF(rect.Right - rect.Width * 0.34f, rect.Y + 15f, rect.Width * 0.26f, rect.Height * 0.3f);
+                g.FillEllipse(rockDark, left);
+                g.FillEllipse(rockLight, mid);
+                g.FillEllipse(rockDark, right);
+                g.DrawEllipse(outline, mid);
+                g.DrawLine(outline, mid.X + 7f, mid.Y + 10f, mid.Right - 7f, mid.Bottom - 9f);
+                g.DrawLine(outline, left.X + 5f, left.Bottom - 4f, left.Right - 6f, left.Y + 8f);
+                continue;
+            }
+
+            if (value == TileMap.TileDoorClosed || value == TileMap.TileDoorOpen)
+            {
+                DrawDoorTile(g, rect, value == TileMap.TileDoorOpen, IsDoorVerticalAt(tx, ty));
+                continue;
+            }
+
+            Color baseColor = value switch
+            {
+                TileMap.TileStoneWall => Color.FromArgb(74, 84, 96),
+                TileMap.TileBarricade => Color.FromArgb(132, 96, 60),
+                TileMap.TileWoodWall => Color.FromArgb(142, 96, 62),
+                _ => Color.FromArgb(74, 84, 96)
+            };
             Color topColor = Mix(baseColor, Color.White, 0.12f);
             Color bottomColor = Mix(baseColor, Color.Black, 0.22f);
             using LinearGradientBrush fill = new LinearGradientBrush(rect, topColor, bottomColor, LinearGradientMode.Vertical);
@@ -3198,6 +4171,15 @@ public sealed partial class Game
             using Pen bevel = new Pen(Color.FromArgb(70, Color.White));
             g.DrawLine(bevel, rect.Left + 2f, rect.Top + 2f, rect.Right - 2f, rect.Top + 2f);
             g.DrawLine(bevel, rect.Left + 2f, rect.Top + 2f, rect.Left + 2f, rect.Bottom - 2f);
+
+            if (value == TileMap.TileWoodWall)
+            {
+                using Pen plank = new Pen(Color.FromArgb(72, 255, 232, 204), 1f);
+                for (float x = rect.Left + 10f; x < rect.Right - 6f; x += 10f)
+                {
+                    g.DrawLine(plank, x, rect.Top + 5f, x, rect.Bottom - 5f);
+                }
+            }
         }
     }
 
@@ -3319,6 +4301,23 @@ public sealed partial class Game
 
             using SolidBrush fill = new SolidBrush(Color.FromArgb(220, 188, 88, 44));
             using Pen border = new Pen(Color.FromArgb(150, 255, 220, 196));
+            g.FillEllipse(fill, rect);
+            g.DrawEllipse(border, rect);
+        }
+
+        foreach (Grenade grenade in _clientPredictedGrenades)
+        {
+            if (!IsVisible(grenade.Position, grenade.Radius + 14f))
+            {
+                continue;
+            }
+
+            float r = grenade.Radius;
+            RectangleF rect = new RectangleF(grenade.Position.X - r, grenade.Position.Y - r, r * 2f, r * 2f);
+            DrawShadow(g, new RectangleF(rect.X, rect.Y, rect.Width, rect.Height * 0.65f), r * 0.45f, 20, 3f);
+
+            using SolidBrush fill = new SolidBrush(Color.FromArgb(136, 214, 120, 66));
+            using Pen border = new Pen(Color.FromArgb(88, 255, 232, 208));
             g.FillEllipse(fill, rect);
             g.DrawEllipse(border, rect);
         }
@@ -3505,12 +4504,12 @@ public sealed partial class Game
                 g.FillEllipse(aura, player.Position.X - r - 7f, player.Position.Y - r - 7f, (r + 7f) * 2f, (r + 7f) * 2f);
             }
 
-            using SolidBrush body = new SolidBrush(Color.FromArgb(228, player.Accent));
-            using Pen outline = new Pen(Color.FromArgb(120, 255, 255, 255), 1.2f);
+            using SolidBrush body = new SolidBrush(Color.FromArgb(GetEntityAlpha(228, player.Position), player.Accent));
+            using Pen outline = new Pen(Color.FromArgb(GetEntityAlpha(120, player.Position, 0.8f), 255, 255, 255), 1.2f);
             g.FillEllipse(body, bodyRect);
             g.DrawEllipse(outline, bodyRect);
 
-            using SolidBrush visor = new SolidBrush(Color.FromArgb(210, 236, 242, 248));
+            using SolidBrush visor = new SolidBrush(Color.FromArgb(GetEntityAlpha(210, player.Position), 236, 242, 248));
             g.FillEllipse(visor, player.Position.X - r * 0.38f, player.Position.Y - r * 0.2f, r * 0.72f, r * 0.38f);
 
             Vector2 forward = Phys.FromAngle(player.AimAngle);
@@ -3533,6 +4532,7 @@ public sealed partial class Game
             DrawGlassPanel(g, nameRect, 8f, player.Accent, 204);
             SizeF callsignSize = g.MeasureString(player.Callsign, _tinyFont);
             g.DrawString(player.Callsign, _tinyFont, Brushes.White, nameRect.X + (nameRect.Width - callsignSize.Width) / 2f, nameRect.Y + 1f);
+            DrawBushCoverOverlay(g, player.Position, r + 2f);
         }
     }
 
@@ -3549,8 +4549,8 @@ public sealed partial class Game
             RectangleF bodyRect = new RectangleF(remote.Position.X - r, remote.Position.Y - r, r * 2f, r * 2f);
             DrawShadow(g, new RectangleF(bodyRect.X, bodyRect.Y, bodyRect.Width, bodyRect.Height * 0.7f), r * 0.5f, 24, 4f);
 
-            using SolidBrush body = new SolidBrush(Color.FromArgb(210, remote.Accent));
-            using Pen outline = new Pen(Color.FromArgb(100, 255, 255, 255), 1.1f);
+            using SolidBrush body = new SolidBrush(Color.FromArgb(GetEntityAlpha(210, remote.Position), remote.Accent));
+            using Pen outline = new Pen(Color.FromArgb(GetEntityAlpha(100, remote.Position, 0.8f), 255, 255, 255), 1.1f);
             g.FillEllipse(body, bodyRect);
             g.DrawEllipse(outline, bodyRect);
 
@@ -3562,6 +4562,7 @@ public sealed partial class Game
             DrawGlassPanel(g, nameRect, 7f, remote.Accent, 196);
             SizeF nameSize = g.MeasureString(remote.Callsign, _tinyFont);
             g.DrawString(remote.Callsign, _tinyFont, Brushes.WhiteSmoke, nameRect.X + (nameRect.Width - nameSize.Width) / 2f, nameRect.Y + 1f);
+            DrawBushCoverOverlay(g, remote.Position, r + 2f);
         }
     }
 
@@ -3667,6 +4668,8 @@ public sealed partial class Game
             using Pen vignette = new Pen(Color.FromArgb(alpha, 0, 0, 0), thickness);
             g.DrawRectangle(vignette, inset, inset, Math.Max(1, width - 1), Math.Max(1, height - 1));
         }
+
+        DrawEnhancedScreenShaderDetails(g, clientSize, fast);
     }
 
 

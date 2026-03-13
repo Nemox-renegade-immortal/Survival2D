@@ -14,7 +14,8 @@ public enum PlayerUpgradeKind
     Mobility,
     Vitality,
     Grenades,
-    Turrets
+    Turrets,
+    Overdrive
 }
 
 public sealed class Player : Entity
@@ -57,6 +58,8 @@ public sealed class Player : Entity
     public int BarricadeSequence;
     public int OverdriveSequence;
     public int PickupSequence;
+    public int WeaponStateSequence { get; private set; }
+    public int LastAppliedNetworkStateRevision { get; private set; }
 
     public float DamageMultiplier { get; private set; } = 1f;
     public float FireRateMultiplier { get; private set; } = 1f;
@@ -83,6 +86,7 @@ public sealed class Player : Entity
     public int VitalityUpgradeRank { get; private set; }
     public int GrenadeUpgradeRank { get; private set; }
     public int TurretUpgradeRank { get; private set; }
+    public int OverdriveUpgradeRank { get; private set; }
 
     public IReadOnlyList<WeaponState> Arsenal => _arsenal;
     public int SelectedWeaponIndex => _selectedWeaponIndex;
@@ -148,6 +152,7 @@ public sealed class Player : Entity
         VitalityUpgradeRank = 0;
         GrenadeUpgradeRank = 0;
         TurretUpgradeRank = 0;
+        OverdriveUpgradeRank = 0;
         LastMoveInput = Vector2.Zero;
         MoveBlend = 0f;
         PickupAnimation = 0f;
@@ -160,6 +165,8 @@ public sealed class Player : Entity
         BarricadeSequence = 0;
         OverdriveSequence = 0;
         PickupSequence = 0;
+        WeaponStateSequence = 0;
+        LastAppliedNetworkStateRevision = 0;
     }
 
     public void Tick(float dt)
@@ -197,6 +204,7 @@ public sealed class Player : Entity
         _selectedWeaponIndex = slot;
         IsReloading = false;
         ReloadTimer = 0f;
+        AdvanceWeaponStateSequence();
         return true;
     }
 
@@ -236,6 +244,7 @@ public sealed class Player : Entity
             ReloadTimer = 0f;
         }
 
+        AdvanceWeaponStateSequence();
         return true;
     }
 
@@ -292,6 +301,7 @@ public sealed class Player : Entity
             _selectedWeaponIndex = FindFirstUsableActiveWeaponSlot();
         }
 
+        AdvanceWeaponStateSequence();
         return true;
     }
 
@@ -440,12 +450,14 @@ public sealed class Player : Entity
         IsReloading = true;
         ReloadTimer = GetEffectiveReloadTime();
         TriggerReloadAnimation(MathF.Min(0.65f, ReloadTimer));
+        AdvanceWeaponStateSequence();
     }
 
     public void ConsumeShot()
     {
         CurrentWeapon.AmmoInClip = Math.Max(0, CurrentWeapon.AmmoInClip - 1);
         FireTimer = GetEffectiveFireInterval();
+        AdvanceWeaponStateSequence();
 
         if (CurrentWeapon.AmmoInClip <= 0 && CurrentWeapon.AmmoReserve > 0)
         {
@@ -646,6 +658,95 @@ public sealed class Player : Entity
         return CurrentWeapon.EffectiveClipSize;
     }
 
+    public void ApplyNetworkSnapshot(NetPlayerState state)
+    {
+        if (state is null)
+        {
+            return;
+        }
+
+        bool looksLikeInitialPlaceholderState = state.ClientStateRevision <= 0
+            && state.CurrentWeaponAmmoInClip <= 0
+            && state.CurrentWeaponAmmoReserve <= 0
+            && LastAppliedNetworkStateRevision <= 0
+            && CurrentWeapon.AmmoInClip > 0
+            && string.Equals(state.WeaponName, CurrentWeapon.Definition.Name, StringComparison.OrdinalIgnoreCase);
+
+        bool acceptPredictedState = !looksLikeInitialPlaceholderState
+            && (state.ClientStateRevision <= 0 || state.ClientStateRevision >= LastAppliedNetworkStateRevision);
+
+        bool acceptWeaponState = acceptPredictedState
+            && (state.WeaponStateSequence <= 0 || state.WeaponStateSequence >= WeaponStateSequence);
+
+        MaxHealth = Math.Max(1, state.MaxHealth);
+        Health = Math.Clamp(state.Health, 0, MaxHealth);
+        Armor = Math.Max(0, state.Armor);
+        Credits = Math.Max(0, state.Credits);
+        Scrap = Math.Max(0, state.Scrap);
+        BarricadeKits = Math.Max(0, state.BarricadeKits);
+        Kills = Math.Max(0, state.Kills);
+        MaxAdrenaline = MathF.Max(1f, state.MaxAdrenaline);
+        Adrenaline = Math.Clamp(state.Adrenaline, 0f, MaxAdrenaline);
+        MaxTurretCharges = Math.Max(1, state.MaxTurretCharges);
+        TurretCharges = Math.Clamp(state.TurretCharges, 0, MaxTurretCharges);
+
+        if (acceptWeaponState)
+        {
+            WeaponState? syncedWeapon = GetWeaponState(state.WeaponName);
+            if (syncedWeapon is not null && !syncedWeapon.IsEmpty)
+            {
+                if (!syncedWeapon.Unlocked)
+                {
+                    syncedWeapon.Reset(true);
+                }
+
+                syncedWeapon.ApplyNetworkState(state.WeaponLevel, state.CurrentWeaponAmmoInClip, state.CurrentWeaponAmmoReserve);
+                int syncedIndex = _arsenal.IndexOf(syncedWeapon);
+                if (syncedIndex >= 0)
+                {
+                    _selectedWeaponIndex = syncedIndex;
+                }
+            }
+            else if (_selectedWeaponIndex >= 0 && _selectedWeaponIndex < _arsenal.Count)
+            {
+                _arsenal[_selectedWeaponIndex].ApplyNetworkState(state.WeaponLevel, state.CurrentWeaponAmmoInClip, state.CurrentWeaponAmmoReserve);
+            }
+
+            float remoteFireTimer = MathF.Max(0f, state.FireTimer);
+            if (FireTimer > 0f)
+            {
+                FireTimer = MathF.Min(FireTimer, remoteFireTimer);
+            }
+
+            float remoteReloadTimer = state.IsReloading ? Math.Clamp(state.ReloadTimer, 0f, MathF.Max(0.05f, GetEffectiveReloadTime())) : 0f;
+            if (state.IsReloading)
+            {
+                IsReloading = true;
+                ReloadTimer = ReloadTimer > 0f ? MathF.Min(ReloadTimer, remoteReloadTimer) : remoteReloadTimer;
+            }
+            else
+            {
+                IsReloading = false;
+                ReloadTimer = 0f;
+            }
+
+            ReloadAnimation = MathF.Max(ReloadAnimation, MathF.Max(0f, state.ReloadAnimation));
+            WeaponStateSequence = Math.Max(WeaponStateSequence, state.WeaponStateSequence);
+        }
+
+        if (acceptPredictedState)
+        {
+            LastAppliedNetworkStateRevision = Math.Max(LastAppliedNetworkStateRevision, state.ClientStateRevision);
+        }
+
+        if (!state.IsAlive)
+        {
+            Health = 0;
+            IsReloading = false;
+            ReloadTimer = 0f;
+        }
+    }
+
     public bool AwardWeaponExperience(string weaponName, int amount)
     {
         WeaponState? state = GetWeaponState(weaponName);
@@ -663,6 +764,7 @@ public sealed class Player : Entity
             PlayerUpgradeKind.Vitality => 55 + VitalityUpgradeRank * 28,
             PlayerUpgradeKind.Grenades => 62 + GrenadeUpgradeRank * 28,
             PlayerUpgradeKind.Turrets => 74 + TurretUpgradeRank * 34,
+            PlayerUpgradeKind.Overdrive => 58 + OverdriveUpgradeRank * 26,
             _ => 999
         };
     }
@@ -708,6 +810,11 @@ public sealed class Player : Entity
                 TurretUpgradeRank++;
                 ImproveTurrets();
                 return true;
+            case PlayerUpgradeKind.Overdrive:
+                OverdriveUpgradeRank++;
+                OverdriveDuration += 0.85f;
+                OverdriveChargeMultiplier += 0.12f;
+                return true;
             default:
                 Credits += cost;
                 return false;
@@ -717,10 +824,21 @@ public sealed class Player : Entity
     private void FinishReload()
     {
         IsReloading = false;
+        ReloadTimer = 0f;
         int need = GetCurrentClipSize() - CurrentWeapon.AmmoInClip;
         int moved = Math.Min(need, CurrentWeapon.AmmoReserve);
         CurrentWeapon.AmmoReserve -= moved;
         CurrentWeapon.AmmoInClip += moved;
         CurrentWeapon.ClampAmmo();
+        AdvanceWeaponStateSequence();
+    }
+
+    private void AdvanceWeaponStateSequence()
+    {
+        WeaponStateSequence = unchecked(WeaponStateSequence + 1);
+        if (WeaponStateSequence <= 0)
+        {
+            WeaponStateSequence = 1;
+        }
     }
 }

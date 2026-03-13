@@ -8,6 +8,7 @@ public sealed class NetHello
 {
     public string Kind { get; set; } = "hello";
     public string Callsign { get; set; } = "";
+    public string SessionId { get; set; } = "";
 }
 
 public sealed class NetAssigned
@@ -16,8 +17,9 @@ public sealed class NetAssigned
     public int PlayerId { get; set; }
     public int MaxPlayers { get; set; } = 64;
     public int MapSeed { get; set; }
-    public int PlayerSnapshotRateHz { get; set; } = 20;
-    public int WorldSnapshotRateHz { get; set; } = 8;
+    public int PlayerSnapshotRateHz { get; set; } = 30;
+    public int WorldSnapshotRateHz { get; set; } = 15;
+    public bool Resumed { get; set; }
 }
 
 public sealed class NetPing
@@ -42,6 +44,7 @@ public sealed class NetPlayerState
     public float Y { get; set; }
     public float AimAngle { get; set; }
     public int Health { get; set; } = 100;
+    public int MaxHealth { get; set; } = 100;
     public int Armor { get; set; }
     public bool IsAlive { get; set; } = true;
     public int AccentArgb { get; set; }
@@ -49,10 +52,24 @@ public sealed class NetPlayerState
     public int WeaponLevel { get; set; } = 1;
     public int WeaponSlot { get; set; }
     public int SelectedHotbarRawIndex { get; set; }
+    public int CurrentWeaponAmmoInClip { get; set; }
+    public int CurrentWeaponAmmoReserve { get; set; }
+    public int Credits { get; set; }
+    public int Scrap { get; set; }
+    public int BarricadeKits { get; set; }
+    public int Kills { get; set; }
+    public int TurretCharges { get; set; }
+    public int MaxTurretCharges { get; set; } = 1;
+    public float Adrenaline { get; set; }
+    public float MaxAdrenaline { get; set; } = 100f;
     public float MoveX { get; set; }
     public float MoveY { get; set; }
     public float MoveBlend { get; set; }
+    public int ClientStateRevision { get; set; }
+    public int WeaponStateSequence { get; set; }
+    public float FireTimer { get; set; }
     public bool IsReloading { get; set; }
+    public float ReloadTimer { get; set; }
     public bool IsOverdriveActive { get; set; }
     public float ShootAnimation { get; set; }
     public float PickupAnimation { get; set; }
@@ -76,6 +93,7 @@ public sealed class NetPlayerState
             Y = Y,
             AimAngle = AimAngle,
             Health = Health,
+            MaxHealth = MaxHealth,
             Armor = Armor,
             IsAlive = IsAlive,
             AccentArgb = AccentArgb,
@@ -83,10 +101,24 @@ public sealed class NetPlayerState
             WeaponLevel = WeaponLevel,
             WeaponSlot = WeaponSlot,
             SelectedHotbarRawIndex = SelectedHotbarRawIndex,
+            CurrentWeaponAmmoInClip = CurrentWeaponAmmoInClip,
+            CurrentWeaponAmmoReserve = CurrentWeaponAmmoReserve,
+            Credits = Credits,
+            Scrap = Scrap,
+            BarricadeKits = BarricadeKits,
+            Kills = Kills,
+            TurretCharges = TurretCharges,
+            MaxTurretCharges = MaxTurretCharges,
+            Adrenaline = Adrenaline,
+            MaxAdrenaline = MaxAdrenaline,
             MoveX = MoveX,
             MoveY = MoveY,
             MoveBlend = MoveBlend,
+            ClientStateRevision = ClientStateRevision,
+            WeaponStateSequence = WeaponStateSequence,
+            FireTimer = FireTimer,
             IsReloading = IsReloading,
+            ReloadTimer = ReloadTimer,
             IsOverdriveActive = IsOverdriveActive,
             ShootAnimation = ShootAnimation,
             PickupAnimation = PickupAnimation,
@@ -203,6 +235,20 @@ public sealed class NetBarricadeState
     public int Health { get; set; }
 }
 
+public sealed class NetFxEventState
+{
+    public int Id { get; set; }
+    public int TypeId { get; set; }
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float VelocityX { get; set; }
+    public float VelocityY { get; set; }
+    public float Radius { get; set; }
+    public int TintArgb { get; set; }
+    public int Value { get; set; }
+    public bool Flag { get; set; }
+}
+
 public sealed class NetWorldState
 {
     public int WaveNumber { get; set; }
@@ -227,6 +273,7 @@ public sealed class NetWorldState
     public List<NetGrenadeState> Grenades { get; set; } = new List<NetGrenadeState>();
     public List<NetExplosionState> Explosions { get; set; } = new List<NetExplosionState>();
     public List<NetBarricadeState> Barricades { get; set; } = new List<NetBarricadeState>();
+    public List<NetFxEventState> FxEvents { get; set; } = new List<NetFxEventState>();
 
     public NetWorldState Clone()
     {
@@ -335,6 +382,19 @@ public sealed class NetWorldState
                 Tx = b.Tx,
                 Ty = b.Ty,
                 Health = b.Health
+            }).ToList(),
+            FxEvents = FxEvents.Select(f => new NetFxEventState
+            {
+                Id = f.Id,
+                TypeId = f.TypeId,
+                X = f.X,
+                Y = f.Y,
+                VelocityX = f.VelocityX,
+                VelocityY = f.VelocityY,
+                Radius = f.Radius,
+                TintArgb = f.TintArgb,
+                Value = f.Value,
+                Flag = f.Flag
             }).ToList()
         };
     }

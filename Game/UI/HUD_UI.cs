@@ -14,11 +14,13 @@ public sealed partial class Game
     private int _inventoryDragHoverRawIndex = -1;
     private InventoryViewMode _inventoryViewMode = InventoryViewMode.Inventory;
     private int _craftRecipeIndex;
+    private int _upgradeWorkbenchIndex;
 
     private enum InventoryViewMode
     {
         Inventory,
-        Craft
+        Craft,
+        Upgrades
     }
 
     private enum InventorySlotKind
@@ -80,6 +82,25 @@ public sealed partial class Game
         }
     }
 
+
+    private readonly struct UpgradeWorkbenchView
+    {
+        public readonly string Title;
+        public readonly string Subtitle;
+        public readonly string Description;
+        public readonly Color Accent;
+        public readonly InventorySlotKind IconKind;
+
+        public UpgradeWorkbenchView(string title, string subtitle, string description, Color accent, InventorySlotKind iconKind)
+        {
+            Title = title;
+            Subtitle = subtitle;
+            Description = description;
+            Accent = accent;
+            IconKind = iconKind;
+        }
+    }
+
     private bool UseNativeImGuiUi() => true;
 
     public void DrawImGui(Vector2 displaySize)
@@ -91,6 +112,7 @@ public sealed partial class Game
         DrawImGuiWorld(bg, screen);
         DrawImGuiDayNightOverlay(bg, screen);
         DrawImGuiWorldGlow(bg, screen);
+        DrawImGuiAtmosphereShader(bg, screen);
 
         bool gameplayOverlay = _phase == GamePhase.Playing || _phase == GamePhase.Paused || _phase == GamePhase.GameOver;
         if (gameplayOverlay)
@@ -165,6 +187,7 @@ public sealed partial class Game
         DrawImGuiZombies(draw);
         DrawImGuiPlayers(draw);
         DrawImGuiRemotePlayers(draw);
+        DrawImGuiWorldParticles(draw);
     }
 
     private void DrawImGuiFloor(ImDrawListPtr draw, Vector2 screen)
@@ -174,8 +197,59 @@ public sealed partial class Game
         uint bottom = ToU32(Mix(Color.FromArgb(10, 14, 22), Color.FromArgb(2, 4, 8), darkness));
         draw.AddRectFilledMultiColor(Vector2.Zero, screen, top, top, bottom, bottom);
 
+        Rectangle view = new Rectangle((int)Camera.X, (int)Camera.Y, (int)screen.X, (int)screen.Y);
+        foreach ((RectangleF rect, int floorType) in Map.GetGroundTiles(view))
+        {
+            Vector2 min = WorldToScreen(new Vector2(rect.Left, rect.Top));
+            Vector2 max = WorldToScreen(new Vector2(rect.Right, rect.Bottom));
+            if (floorType == TileMap.FloorGrass)
+            {
+                Color grassTop = Mix(Color.FromArgb(42, 96, 60), Color.FromArgb(16, 34, 24), darkness);
+                Color grassBottom = Mix(Color.FromArgb(24, 54, 34), Color.FromArgb(8, 18, 12), darkness);
+                draw.AddRectFilledMultiColor(min, max, ToU32(Color.FromArgb(120, grassTop)), ToU32(Color.FromArgb(120, grassTop)), ToU32(Color.FromArgb(132, grassBottom)), ToU32(Color.FromArgb(132, grassBottom)));
+
+                float sway = 2f + 1.5f * (0.5f + 0.5f * MathF.Sin(_backgroundPulse * 2f + rect.Left * 0.05f + rect.Top * 0.03f));
+                uint grassLine = ToU32(Color.FromArgb((int)(26f + (1f - darkness) * 18f), 122, 182, 118));
+                for (float x = min.X + 8f; x < max.X - 6f; x += 10f)
+                {
+                    draw.AddLine(new Vector2(x, max.Y - 7f), new Vector2(x + sway, max.Y - 16f), grassLine, 1f);
+                }
+            }
+            else if (floorType == TileMap.FloorStone)
+            {
+                Color stoneTop = Mix(Color.FromArgb(78, 82, 92), Color.FromArgb(24, 28, 34), darkness);
+                Color stoneBottom = Mix(Color.FromArgb(52, 56, 64), Color.FromArgb(12, 16, 20), darkness);
+                draw.AddRectFilledMultiColor(min, max, ToU32(Color.FromArgb(110, stoneTop)), ToU32(Color.FromArgb(110, stoneTop)), ToU32(Color.FromArgb(128, stoneBottom)), ToU32(Color.FromArgb(128, stoneBottom)));
+                draw.AddLine(new Vector2(min.X + 6f, min.Y + 9f), new Vector2(max.X - 8f, max.Y - 11f), ToU32(Color.FromArgb(38, 220, 226, 232)), 1f);
+            }
+            else if (floorType == TileMap.FloorShore)
+            {
+                Color shoreTop = Mix(Color.FromArgb(132, 126, 88), Color.FromArgb(52, 48, 34), darkness);
+                Color shoreBottom = Mix(Color.FromArgb(84, 96, 64), Color.FromArgb(20, 24, 16), darkness);
+                draw.AddRectFilledMultiColor(min, max, ToU32(Color.FromArgb(132, shoreTop)), ToU32(Color.FromArgb(132, shoreTop)), ToU32(Color.FromArgb(148, shoreBottom)), ToU32(Color.FromArgb(148, shoreBottom)));
+                uint reed = ToU32(Color.FromArgb((int)(22f + (1f - darkness) * 16f), 214, 226, 172));
+                for (float x = min.X + 9f; x < max.X - 7f; x += 12f)
+                {
+                    draw.AddLine(new Vector2(x, max.Y - 6f), new Vector2(x + 2f, max.Y - 15f), reed, 1f);
+                }
+            }
+            else if (floorType == TileMap.FloorWater)
+            {
+                Color waterTop = Mix(Color.FromArgb(56, 150, 196), Color.FromArgb(16, 60, 86), darkness);
+                Color waterBottom = Mix(Color.FromArgb(10, 74, 116), Color.FromArgb(4, 18, 34), darkness);
+                draw.AddRectFilledMultiColor(min, max, ToU32(Color.FromArgb(160, waterTop)), ToU32(Color.FromArgb(160, waterTop)), ToU32(Color.FromArgb(188, waterBottom)), ToU32(Color.FromArgb(188, waterBottom)));
+                uint ripple = ToU32(Color.FromArgb((int)(24f + (1f - darkness) * 22f), 228, 246, 255));
+                float phase = _backgroundPulse * 2.2f + rect.Left * 0.05f + rect.Top * 0.03f;
+                for (int i = 0; i < 3; i++)
+                {
+                    float y = min.Y + 8f + i * 10f + MathF.Sin(phase + i) * 2f;
+                    draw.AddLine(new Vector2(min.X + 5f, y), new Vector2(max.X - 5f, y), ripple, 1f);
+                }
+            }
+        }
+
         int grid = TileMap.TileSize;
-        uint gridColor = ToU32(Mix(Color.FromArgb(28, 78, 102, 122), Color.FromArgb(18, 62, 86, 122), darkness));
+        uint gridColor = ToU32(Mix(Color.FromArgb(22, 74, 98, 118), Color.FromArgb(14, 56, 80, 112), darkness));
         int startX = (int)(Camera.X / grid) * grid;
         int startY = (int)(Camera.Y / grid) * grid;
 
@@ -202,13 +276,103 @@ public sealed partial class Game
                 continue;
             }
 
-            Color baseColor = value == 1 ? Color.FromArgb(74, 84, 96) : Color.FromArgb(132, 96, 60);
-            Color topColor = Mix(baseColor, Color.White, 0.12f);
-            Color bottomColor = Mix(baseColor, Color.Black, 0.22f);
             Vector2 min = WorldToScreen(new Vector2(rect.Left, rect.Top));
             Vector2 max = WorldToScreen(new Vector2(rect.Right, rect.Bottom));
-            draw.AddRectFilledMultiColor(min, max, ToU32(topColor), ToU32(topColor), ToU32(bottomColor), ToU32(bottomColor));
-            draw.AddRect(min, max, ToU32(Color.FromArgb(160, Mix(baseColor, Color.Black, 0.35f))), 0f, ImDrawFlags.None, 1f);
+            Vector2 center = (min + max) * 0.5f;
+            int tx = (int)(rect.X / TileMap.TileSize);
+            int ty = (int)(rect.Y / TileMap.TileSize);
+
+            switch (value)
+            {
+                case TileMap.TileTree:
+                    {
+                        draw.AddRectFilled(new Vector2(center.X - 5f, max.Y - 17f), new Vector2(center.X + 5f, max.Y - 4f), ToU32(Color.FromArgb(220, 96, 66, 38)), 2f);
+                        draw.AddCircleFilled(new Vector2(center.X, center.Y - 4f), 15f, ToU32(Color.FromArgb(214, 44, 118, 76)), 22);
+                        draw.AddCircleFilled(new Vector2(center.X - 10f, center.Y + 1f), 10f, ToU32(Color.FromArgb(196, 38, 104, 70)), 18);
+                        draw.AddCircleFilled(new Vector2(center.X + 10f, center.Y + 1f), 10f, ToU32(Color.FromArgb(196, 46, 132, 82)), 18);
+                        break;
+                    }
+                case TileMap.TileBush:
+                    {
+                        draw.AddCircleFilled(center + new Vector2(-8f, 5f), 9f, ToU32(Color.FromArgb(214, 44, 108, 66)), 18);
+                        draw.AddCircleFilled(center + new Vector2(0f, -1f), 12f, ToU32(Color.FromArgb(224, 74, 150, 92)), 20);
+                        draw.AddCircleFilled(center + new Vector2(9f, 5f), 8f, ToU32(Color.FromArgb(208, 38, 102, 60)), 18);
+                        draw.AddLine(new Vector2(center.X - 12f, max.Y - 8f), new Vector2(center.X - 7f, max.Y - 15f), ToU32(Color.FromArgb(120, 210, 238, 206)), 1f);
+                        break;
+                    }
+                case TileMap.TileRock:
+                    {
+                        draw.AddCircleFilled(center + new Vector2(-7f, 4f), 8f, ToU32(Color.FromArgb(202, 86, 96, 106)), 18);
+                        draw.AddCircleFilled(center + new Vector2(1f, -1f), 10f, ToU32(Color.FromArgb(218, 126, 134, 142)), 18);
+                        draw.AddCircleFilled(center + new Vector2(10f, 4f), 7f, ToU32(Color.FromArgb(198, 90, 100, 110)), 18);
+                        draw.AddLine(center + new Vector2(-1f, -6f), center + new Vector2(5f, 7f), ToU32(Color.FromArgb(140, 46, 52, 60)), 1.2f);
+                        break;
+                    }
+                case TileMap.TileDoorClosed:
+                case TileMap.TileDoorOpen:
+                    {
+                        bool vertical = IsDoorVerticalAt(tx, ty);
+                        draw.AddRect(min + new Vector2(3f, 3f), max - new Vector2(3f, 3f), ToU32(Color.FromArgb(176, 86, 58, 34)), 2f, ImDrawFlags.None, 2f);
+                        Vector2 gapMin = vertical ? new Vector2(center.X - 9f, min.Y + 5f) : new Vector2(min.X + 5f, center.Y - 9f);
+                        Vector2 gapMax = vertical ? new Vector2(center.X + 9f, max.Y - 5f) : new Vector2(max.X - 5f, center.Y + 9f);
+                        draw.AddRectFilled(gapMin, gapMax, ToU32(Color.FromArgb(value == TileMap.TileDoorOpen ? 24 : 42, 10, 10, 12)), 1f);
+
+                        Vector2 panelMin;
+                        Vector2 panelMax;
+                        if (value == TileMap.TileDoorOpen)
+                        {
+                            panelMin = vertical ? new Vector2(max.X - 15f, min.Y + 7f) : new Vector2(min.X + 7f, min.Y + 6f);
+                            panelMax = vertical ? new Vector2(max.X - 6f, max.Y - 7f) : new Vector2(max.X - 7f, min.Y + 15f);
+                        }
+                        else
+                        {
+                            panelMin = vertical ? new Vector2(center.X - 6f, min.Y + 6f) : new Vector2(min.X + 6f, center.Y - 6f);
+                            panelMax = vertical ? new Vector2(center.X + 6f, max.Y - 6f) : new Vector2(max.X - 6f, center.Y + 6f);
+                        }
+
+                        draw.AddRectFilled(panelMin, panelMax, ToU32(Color.FromArgb(220, 168, 118, 72)), 1.5f);
+                        draw.AddRect(panelMin, panelMax, ToU32(Color.FromArgb(188, 74, 46, 28)), 1.5f, ImDrawFlags.None, 1.2f);
+                        if (vertical)
+                        {
+                            for (float x = panelMin.X + 3f; x < panelMax.X - 2f; x += 4f)
+                            {
+                                draw.AddLine(new Vector2(x, panelMin.Y + 2f), new Vector2(x, panelMax.Y - 2f), ToU32(Color.FromArgb(88, 250, 226, 192)), 1f);
+                            }
+                        }
+                        else
+                        {
+                            for (float y = panelMin.Y + 3f; y < panelMax.Y - 2f; y += 4f)
+                            {
+                                draw.AddLine(new Vector2(panelMin.X + 2f, y), new Vector2(panelMax.X - 2f, y), ToU32(Color.FromArgb(88, 250, 226, 192)), 1f);
+                            }
+                        }
+                        break;
+                    }
+                default:
+                    {
+                        Color baseColor = value switch
+                        {
+                            TileMap.TileStoneWall => Color.FromArgb(74, 84, 96),
+                            TileMap.TileBarricade => Color.FromArgb(132, 96, 60),
+                            TileMap.TileWoodWall => Color.FromArgb(142, 96, 62),
+                            _ => Color.FromArgb(74, 84, 96)
+                        };
+                        Color topColor = Mix(baseColor, Color.White, 0.12f);
+                        Color bottomColor = Mix(baseColor, Color.Black, 0.22f);
+                        draw.AddRectFilledMultiColor(min, max, ToU32(topColor), ToU32(topColor), ToU32(bottomColor), ToU32(bottomColor));
+                        draw.AddRect(min, max, ToU32(Color.FromArgb(160, Mix(baseColor, Color.Black, 0.35f))), 0f, ImDrawFlags.None, 1f);
+
+                        if (value == TileMap.TileWoodWall)
+                        {
+                            uint plank = ToU32(Color.FromArgb(72, 246, 224, 194));
+                            for (float x = min.X + 9f; x < max.X - 8f; x += 10f)
+                            {
+                                draw.AddLine(new Vector2(x, min.Y + 5f), new Vector2(x, max.Y - 5f), plank, 1f);
+                            }
+                        }
+                        break;
+                    }
+            }
         }
     }
 
@@ -382,6 +546,19 @@ public sealed partial class Game
             draw.AddCircleFilled(p, grenade.Radius, ToU32(Color.FromArgb(220, 188, 88, 44)), 16);
             draw.AddCircle(p, grenade.Radius, ToU32(Color.FromArgb(150, 255, 220, 196)), 16, 1f);
         }
+
+        foreach (Grenade grenade in _clientPredictedGrenades)
+        {
+            if (!IsVisible(grenade.Position, grenade.Radius + 14f))
+            {
+                continue;
+            }
+
+            Vector2 p = WorldToScreen(grenade.Position);
+            draw.AddCircleFilled(p + new Vector2(0f, 4f), grenade.Radius * 0.72f, ToU32(Color.FromArgb(18, 0, 0, 0)), 16);
+            draw.AddCircleFilled(p, grenade.Radius, ToU32(Color.FromArgb(150, 214, 120, 66)), 16);
+            draw.AddCircle(p, grenade.Radius, ToU32(Color.FromArgb(90, 255, 232, 208)), 16, 1f);
+        }
     }
 
     private void DrawImGuiExplosions(ImDrawListPtr draw)
@@ -417,6 +594,18 @@ public sealed partial class Game
         }
     }
 
+    private void DrawImGuiBushOverlay(ImDrawListPtr draw, Vector2 center, float radius, Vector2 worldPosition)
+    {
+        if (!Map.IsConcealing(worldPosition))
+        {
+            return;
+        }
+
+        draw.AddCircleFilled(center + new Vector2(-8f, 4f), radius * 0.62f, ToU32(Color.FromArgb(86, 44, 114, 70)), 20);
+        draw.AddCircleFilled(center + new Vector2(0f, -1f), radius * 0.78f, ToU32(Color.FromArgb(96, 84, 166, 104)), 22);
+        draw.AddCircleFilled(center + new Vector2(9f, 5f), radius * 0.56f, ToU32(Color.FromArgb(88, 38, 102, 62)), 20);
+    }
+
     private void DrawImGuiPlayers(ImDrawListPtr draw)
     {
         foreach (Player player in _players)
@@ -440,8 +629,8 @@ public sealed partial class Game
             }
 
             draw.AddCircleFilled(p + new Vector2(0f, 5f), radius * 0.82f, ToU32(Color.FromArgb(34, 0, 0, 0)), 24);
-            draw.AddCircleFilled(p, radius, ToU32(Color.FromArgb(230, player.Accent)), 24);
-            draw.AddCircle(p, radius, ToU32(Color.FromArgb(124, 255, 255, 255)), 24, 1.2f);
+            draw.AddCircleFilled(p, radius, ToU32(Color.FromArgb(GetEntityAlpha(230, player.Position), player.Accent)), 24);
+            draw.AddCircle(p, radius, ToU32(Color.FromArgb(GetEntityAlpha(124, player.Position, 0.8f), 255, 255, 255)), 24, 1.2f);
 
             if (reloadRing > 0.04f)
             {
@@ -470,6 +659,7 @@ public sealed partial class Game
             }
 
             draw.AddText(new Vector2(p.X - 18f, p.Y - radius - 24f), ToU32(Color.WhiteSmoke), player.Callsign);
+            DrawImGuiBushOverlay(draw, p, radius + 2f, player.Position);
         }
     }
 
@@ -478,25 +668,25 @@ public sealed partial class Game
         switch (rawIndex)
         {
             case 4:
-            {
-                Vector2 min = new Vector2(hand.X - 7f, hand.Y - 6f);
-                Vector2 max = new Vector2(hand.X + 7f, hand.Y + 6f);
-                draw.AddRectFilled(min, max, ToU32(Color.FromArgb(220, 98, 106, 116)), 2f);
-                draw.AddRect(min, max, ToU32(Color.FromArgb(210, 226, 234, 242)), 2f, ImDrawFlags.None, 1.4f);
-                break;
-            }
+                {
+                    Vector2 min = new Vector2(hand.X - 7f, hand.Y - 6f);
+                    Vector2 max = new Vector2(hand.X + 7f, hand.Y + 6f);
+                    draw.AddRectFilled(min, max, ToU32(Color.FromArgb(220, 98, 106, 116)), 2f);
+                    draw.AddRect(min, max, ToU32(Color.FromArgb(210, 226, 234, 242)), 2f, ImDrawFlags.None, 1.4f);
+                    break;
+                }
             case 5:
                 draw.AddCircleFilled(hand, 6f, ToU32(Color.FromArgb(226, 192, 148, 86)), 18);
                 draw.AddCircle(hand, 6f, ToU32(Color.FromArgb(220, 255, 238, 202)), 18, 1.4f);
                 break;
             case 6:
-            {
-                Vector2 min = new Vector2(hand.X - 8f + forward.X * 2f, hand.Y - 6f + forward.Y * 2f);
-                Vector2 max = new Vector2(min.X + 16f, min.Y + 12f);
-                draw.AddRectFilled(min, max, ToU32(Color.FromArgb(220, 116, 84, 54)), 2f);
-                draw.AddRect(min, max, ToU32(Color.FromArgb(210, 238, 220, 200)), 2f, ImDrawFlags.None, 1.6f);
-                break;
-            }
+                {
+                    Vector2 min = new Vector2(hand.X - 8f + forward.X * 2f, hand.Y - 6f + forward.Y * 2f);
+                    Vector2 max = new Vector2(min.X + 16f, min.Y + 12f);
+                    draw.AddRectFilled(min, max, ToU32(Color.FromArgb(220, 116, 84, 54)), 2f);
+                    draw.AddRect(min, max, ToU32(Color.FromArgb(210, 238, 220, 200)), 2f, ImDrawFlags.None, 1.6f);
+                    break;
+                }
             case 7:
                 draw.AddCircleFilled(hand, 6f, ToU32(Color.FromArgb(226, 168, 104, 48)), 18);
                 draw.AddCircle(hand, 6f, ToU32(Color.FromArgb(220, 250, 232, 190)), 18, 1.4f);
@@ -508,14 +698,14 @@ public sealed partial class Game
                 draw.AddLine(hand, hand + forward * 12f, ToU32(Color.FromArgb(220, 216, 246, 252)), 1.4f);
                 break;
             case 9:
-            {
-                Vector2 min = new Vector2(hand.X - 7f, hand.Y - 9f);
-                Vector2 max = new Vector2(hand.X + 7f, hand.Y + 9f);
-                draw.AddRectFilled(min, max, ToU32(Color.FromArgb(226, 138, 88, 44)), 2f);
-                draw.AddRect(min, max, ToU32(Color.FromArgb(220, 255, 228, 182)), 2f, ImDrawFlags.None, 1.4f);
-                draw.AddLine(new Vector2(hand.X - 3f, hand.Y - 12f), new Vector2(hand.X + 3f, hand.Y - 12f), ToU32(Color.FromArgb(220, 255, 228, 182)), 1.4f);
-                break;
-            }
+                {
+                    Vector2 min = new Vector2(hand.X - 7f, hand.Y - 9f);
+                    Vector2 max = new Vector2(hand.X + 7f, hand.Y + 9f);
+                    draw.AddRectFilled(min, max, ToU32(Color.FromArgb(226, 138, 88, 44)), 2f);
+                    draw.AddRect(min, max, ToU32(Color.FromArgb(220, 255, 228, 182)), 2f, ImDrawFlags.None, 1.4f);
+                    draw.AddLine(new Vector2(hand.X - 3f, hand.Y - 12f), new Vector2(hand.X + 3f, hand.Y - 12f), ToU32(Color.FromArgb(220, 255, 228, 182)), 1.4f);
+                    break;
+                }
         }
     }
 
@@ -540,8 +730,8 @@ public sealed partial class Game
             }
 
             draw.AddCircleFilled(p + new Vector2(0f, 4f), r * 0.8f, ToU32(Color.FromArgb(24, 0, 0, 0)), 24);
-            draw.AddCircleFilled(p, r, ToU32(Color.FromArgb(214, remote.Accent)), 24);
-            draw.AddCircle(p, r, ToU32(Color.FromArgb(104, 255, 255, 255)), 24, 1.1f);
+            draw.AddCircleFilled(p, r, ToU32(Color.FromArgb(GetEntityAlpha(214, remote.Position), remote.Accent)), 24);
+            draw.AddCircle(p, r, ToU32(Color.FromArgb(GetEntityAlpha(104, remote.Position, 0.8f), 255, 255, 255)), 24, 1.1f);
 
             if (remote.ReloadAnimation > 0.04f)
             {
@@ -560,6 +750,7 @@ public sealed partial class Game
                 DrawImGuiHeldItem(draw, remote.SelectedHotbarRawIndex, tip, dir);
             }
             draw.AddText(new Vector2(p.X - 18f, p.Y - 30f), ToU32(Color.WhiteSmoke), remote.Callsign);
+            DrawImGuiBushOverlay(draw, p, r + 2f, remote.Position);
         }
     }
 
@@ -582,6 +773,40 @@ public sealed partial class Game
 
         int alpha = (int)(16f + _dayNight.Darkness * 108f);
         draw.AddRectFilled(Vector2.Zero, screen, ToU32(Color.FromArgb(alpha, 6, 10, 18)));
+    }
+
+    private void DrawImGuiAtmosphereShader(ImDrawListPtr draw, Vector2 screen)
+    {
+        if (_phase != GamePhase.Playing && _phase != GamePhase.Paused && _phase != GamePhase.GameOver)
+        {
+            return;
+        }
+
+        float darkness = _dayNight.Darkness;
+        float band = Math.Clamp(Math.Min(screen.X, screen.Y) * 0.18f, 56f, 180f);
+        Color edgeA = Mix(Color.FromArgb(12, 0, 0, 0), Color.FromArgb(82, 0, 8, 16), darkness);
+        Color edgeB = Mix(Color.FromArgb(6, 70, 128, 160), Color.FromArgb(104, 12, 18, 32), darkness);
+        draw.AddRectFilledMultiColor(new Vector2(0f, 0f), new Vector2(screen.X, band), ToU32(edgeB), ToU32(edgeB), ToU32(edgeA), ToU32(edgeA));
+        draw.AddRectFilledMultiColor(new Vector2(0f, screen.Y - band), new Vector2(screen.X, screen.Y), ToU32(edgeA), ToU32(edgeA), ToU32(edgeB), ToU32(edgeB));
+        draw.AddRectFilledMultiColor(new Vector2(0f, 0f), new Vector2(band, screen.Y), ToU32(edgeB), ToU32(edgeA), ToU32(edgeA), ToU32(edgeB));
+        draw.AddRectFilledMultiColor(new Vector2(screen.X - band, 0f), new Vector2(screen.X, screen.Y), ToU32(edgeA), ToU32(edgeB), ToU32(edgeB), ToU32(edgeA));
+
+        if (darkness < 0.55f)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                float shift = (_backgroundPulse * 42f + i * 180f) % (screen.X + screen.Y * 0.6f);
+                Vector2 a = new Vector2(-120f + shift, -20f);
+                Vector2 b = new Vector2(120f + shift, screen.Y + 20f);
+                draw.AddLine(a, b, ToU32(Color.FromArgb(10, 180, 228, 255)), 24f);
+            }
+        }
+        else
+        {
+            DrawGlow(draw, WorldToScreen(Player.Position), 180f + darkness * 40f, Color.FromArgb((int)(10f + darkness * 18f), 86, 140, 190));
+        }
+
+        DrawImGuiAtmosphereShaderDetails(draw, screen);
     }
 
     private void DrawImGuiWorldGlow(ImDrawListPtr draw, Vector2 screen)
@@ -917,9 +1142,16 @@ public sealed partial class Game
         }
         ImGui.End();
 
-        float slotWidth = Math.Clamp((screen.X - 236f) / 9f - 6f, 78f, 92f);
-        float hotbarW = slotWidth * 9f + 8f * 8f + 18f;
-        BeginOverlayWindow("##hotbar_panel", new Vector2((screen.X - hotbarW) * 0.5f, screen.Y - 116f), new Vector2(hotbarW, 100f), 0.93f);
+        float slotWidth = Math.Clamp((screen.X - 220f) / 9f - 8f, 80f, 96f);
+        float hotbarHeight = 134f;
+        float hotbarWidth = slotWidth * 9f + 8f * 8f + 22f;
+        BeginOverlayWindow("##hotbar_panel", new Vector2((screen.X - hotbarWidth) * 0.5f, screen.Y - hotbarHeight - 14f), new Vector2(hotbarWidth, hotbarHeight), 0.94f);
+        ImGui.TextDisabled("Hotbar");
+        ImGui.SameLine();
+        ImGui.TextColored(ToVec4(GetHotbarSlotAccent(player, selectedRawIndex)), $"Slot {GetSelectedHotbarDisplayIndex() + 1}");
+        ImGui.SameLine();
+        ImGui.TextDisabled("1-9 · wheel · click");
+        ImGui.Dummy(new Vector2(0f, 4f));
         for (int displayIndex = 0; displayIndex < 9; displayIndex++)
         {
             if (displayIndex > 0)
@@ -930,19 +1162,26 @@ public sealed partial class Game
             int rawIndex = _inventoryLayout[displayIndex];
             InventoryViewSlot slot = inventorySlots[Math.Clamp(rawIndex, 0, inventorySlots.Count - 1)];
             bool active = displayIndex == GetSelectedHotbarDisplayIndex();
-            if (DrawInventoryTile($"hud_hotbar_{displayIndex}", slot, new Vector2(slotWidth, 60f), (displayIndex + 1).ToString(), active, false, true, false))
+            if (DrawHotbarTile($"hud_hotbar_{displayIndex}", slot, new Vector2(slotWidth, 78f), displayIndex, active))
             {
                 ActivateHotbarSlot(player, displayIndex, new Size((int)screen.X, (int)screen.Y));
             }
         }
-        ImGui.Spacing();
-        ImGui.TextDisabled("Hold LMB on a tile to drag · Tab bag · C craft · top strip mirrors the hotbar.");
+
+        ImGui.Dummy(new Vector2(0f, 10f));
+        ImGui.PushTextWrapPos(0f);
+        ImGui.TextColored(ToVec4(GetHotbarSlotAccent(player, selectedRawIndex)), GetHotbarSlotTitle(player, selectedRawIndex));
+        ImGui.SameLine();
+        ImGui.TextDisabled(GetHotbarSlotValue(player, selectedRawIndex));
+        ImGui.SameLine();
+        ImGui.TextDisabled(GetHotbarSlotHelpText(player, selectedRawIndex));
+        ImGui.PopTextWrapPos();
         ImGui.End();
 
         if (_remotePlayers.Count > 0)
         {
             float remoteHeight = Math.Min(186f, 42f + _remotePlayers.Count * 34f);
-            BeginOverlayWindow("##squad_panel", new Vector2(14f, screen.Y - remoteHeight - 126f), new Vector2(280f, remoteHeight), 0.84f);
+            BeginOverlayWindow("##squad_panel", new Vector2(14f, screen.Y - remoteHeight - 160f), new Vector2(280f, remoteHeight), 0.84f);
             ImGui.Text("Squad");
             ImGui.Separator();
             foreach (RemotePlayerView remote in _remotePlayers)
@@ -971,26 +1210,36 @@ public sealed partial class Game
         }
     }
 
-
     private List<InventoryViewSlot> BuildInventorySlots(Player player)
     {
         List<InventoryViewSlot> slots = new List<InventoryViewSlot>(32);
         for (int i = 0; i < 4; i++)
         {
             WeaponState state = player.Arsenal[i];
-            string value = state.Unlocked ? $"{state.AmmoInClip}/{state.AmmoReserve}" : $"LOCK {state.Definition.UnlockCost}cr";
-            string desc = state.Unlocked
-                ? $"{state.Definition.Name} ready. Put it on the hotbar strip or keep it in the backpack. Drag with held left mouse."
-                : $"{state.Definition.Name} is locked. Buy it for {state.Definition.UnlockCost} credits when you can afford it.";
-            slots.Add(new InventoryViewSlot(state.Definition.Name.ToUpper(), value, desc, GetWeaponColor(state.Definition), InventorySlotKind.Weapon, i, player.SelectedWeaponIndex == i));
+            if (state.Unlocked && !state.IsEmpty)
+            {
+                string value = $"{state.AmmoInClip}/{state.AmmoReserve}";
+                string desc = $"{state.Definition.Name} ready. Put it on the hotbar strip or keep it in the backpack. Drag with held left mouse.";
+                slots.Add(new InventoryViewSlot(state.Definition.Name.ToUpper(), value, desc, GetWeaponColor(state.Definition), InventorySlotKind.Weapon, i, player.SelectedWeaponIndex == i));
+            }
+            else
+            {
+                slots.Add(new InventoryViewSlot("EMPTY", "-", "This weapon slot is empty. Craft another weapon and it will appear here automatically.", Color.FromArgb(74, 80, 88), InventorySlotKind.Empty));
+            }
         }
 
-        slots.Add(new InventoryViewSlot("SCRAP", player.Scrap.ToString(), $"Core crafting material. Open the Craft menu with C to turn it into gear and support tools.", Color.FromArgb(118, 126, 138), InventorySlotKind.Scrap));
+        slots.Add(new InventoryViewSlot("SCRAP", player.Scrap.ToString(), "Core crafting material. Open the Craft menu with C to turn it into gear and support tools.", Color.FromArgb(118, 126, 138), InventorySlotKind.Scrap));
         slots.Add(new InventoryViewSlot("CREDITS", player.Credits.ToString(), "Spend credits on unlocks, upgrades and advanced crafting recipes.", Color.FromArgb(176, 130, 78), InventorySlotKind.Credits));
-        slots.Add(new InventoryViewSlot("BARRICADE", player.BarricadeKits.ToString(), "Portable cover. Drop it in front of a lane to slow the dead down.", Color.FromArgb(150, 106, 70), InventorySlotKind.Barricade));
+        slots.Add(player.BarricadeKits > 0
+            ? new InventoryViewSlot("BARRICADE", player.BarricadeKits.ToString(), "Portable cover. Drop it in front of a lane to slow the dead down.", Color.FromArgb(150, 106, 70), InventorySlotKind.Barricade)
+            : new InventoryViewSlot("EMPTY", "-", "No barricade kits yet. Craft one first and it will pop into the bag automatically.", Color.FromArgb(74, 80, 88), InventorySlotKind.Empty));
         slots.Add(new InventoryViewSlot("GRENADE", player.GrenadeCooldownTimer <= 0f ? "READY" : $"{player.GrenadeCooldownTimer:0.0}s", "Throwable explosive. Right mouse still works, but you can also bind or activate it from the hotbar.", Color.FromArgb(184, 128, 78), InventorySlotKind.Grenade));
-        slots.Add(new InventoryViewSlot("TURRET", $"{player.TurretCharges}/{player.MaxTurretCharges}", "Deployable auto-gun. Keep at least one charge if you want emergency cover fire.", Color.FromArgb(76, 144, 182), InventorySlotKind.Turret));
-        slots.Add(new InventoryViewSlot("OVERDRIVE", player.IsOverdriveActive ? "LIVE" : $"{(int)player.Adrenaline}%", "Combat burst mode. Charge it up, then shove it into a hotbar slot you can hit fast.", Color.FromArgb(214, 134, 72), InventorySlotKind.Overdrive, -1, player.IsOverdriveActive));
+        slots.Add(player.TurretCharges > 0
+            ? new InventoryViewSlot("TURRET", $"{player.TurretCharges}/{player.MaxTurretCharges}", "Deployable auto-gun. Keep at least one charge if you want emergency cover fire.", Color.FromArgb(76, 144, 182), InventorySlotKind.Turret)
+            : new InventoryViewSlot("EMPTY", "-", "No turret charge stored. Craft a turret battery and it will show up here.", Color.FromArgb(74, 80, 88), InventorySlotKind.Empty));
+        slots.Add(player.Adrenaline > 0f || player.IsOverdriveActive
+            ? new InventoryViewSlot("OVERDRIVE", player.IsOverdriveActive ? "LIVE" : $"{(int)player.Adrenaline}%", "Combat burst mode. Charge it up, then shove it into a hotbar slot you can hit fast.", Color.FromArgb(214, 134, 72), InventorySlotKind.Overdrive, -1, player.IsOverdriveActive)
+            : new InventoryViewSlot("EMPTY", "-", "Overdrive is empty. Build a cell or earn charge in combat and it will appear here.", Color.FromArgb(74, 80, 88), InventorySlotKind.Empty));
 
         while (slots.Count < 32)
         {
@@ -1009,19 +1258,40 @@ public sealed partial class Game
         _craftRecipeIndex = Math.Clamp(_craftRecipeIndex, 0, recipes.Count - 1);
         _inventoryDragHoverRawIndex = _inventoryDragRawIndex >= 0 ? _inventoryDragRawIndex : -1;
 
-        Vector2 size = new Vector2(Math.Min(1140f, screen.X - 56f), Math.Min(680f, screen.Y - 54f));
+        Vector2 size = new Vector2(Math.Min(1168f, screen.X - 48f), Math.Min(702f, screen.Y - 42f));
         Vector2 pos = new Vector2((screen.X - size.X) * 0.5f, (screen.Y - size.Y) * 0.5f);
         ImGui.SetNextWindowPos(pos, ImGuiCond.Always);
         ImGui.SetNextWindowSize(size, ImGuiCond.Always);
-        ImGui.SetNextWindowBgAlpha(0.965f);
+        ImGui.SetNextWindowBgAlpha(0.972f);
         ImGui.Begin("Inventory", ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings);
-        ImGui.Text(_inventoryViewMode == InventoryViewMode.Inventory ? "Inventory" : "Craft menu");
+
+        Color headerAccent = _inventoryViewMode == InventoryViewMode.Inventory
+            ? Color.FromArgb(96, 148, 220)
+            : _inventoryViewMode == InventoryViewMode.Craft
+                ? Color.FromArgb(188, 132, 76)
+                : Color.FromArgb(90, 160, 208);
+        string headerTitle = _inventoryViewMode == InventoryViewMode.Inventory ? "Inventory" : _inventoryViewMode == InventoryViewMode.Craft ? "Craft" : "Upgrades";
+        string headerSubtitle = _inventoryViewMode == InventoryViewMode.Inventory
+            ? "Clean layout, fast drag, clearer item states."
+            : _inventoryViewMode == InventoryViewMode.Craft
+                ? "Build weapons, kits and batteries."
+                : "Buff support gear, weapons and survival stats.";
+
+        DrawInventorySectionHeader(headerTitle, headerSubtitle, headerAccent);
+        ImGui.Dummy(new Vector2(0f, 6f));
+        DrawInventorySummaryPill($"Quick {CountFilledDisplaySlots(slots, 0, 8)}/9", Color.FromArgb(96, 148, 220));
         ImGui.SameLine();
-        ImGui.TextDisabled(_inventoryViewMode == InventoryViewMode.Inventory ? "clean slots · hold LMB to drag" : "recipes · quick support crafting");
+        DrawInventorySummaryPill($"Bag {CountFilledDisplaySlots(slots, 9, 31)}/23", Color.FromArgb(104, 112, 124));
+        ImGui.SameLine();
+        DrawInventorySummaryPill($"Weapons {CountWeaponSlots(player)}", Color.FromArgb(118, 96, 176));
+        ImGui.SameLine();
+        DrawInventorySummaryPill($"Ready {CountReadySupportSlots(player)}", Color.FromArgb(204, 140, 84));
         ImGui.Separator();
 
-        float navWidth = 124f;
+        float navWidth = 148f;
         ImGui.BeginChild("inv_nav", new Vector2(navWidth, 0f), ImGuiChildFlags.Borders);
+        DrawInventorySectionHeader("Sections", "Pick a page", Color.FromArgb(126, 136, 148));
+        ImGui.Dummy(new Vector2(0f, 8f));
         if (DrawInventoryModeButton("mode_inventory", "Inventory", InventorySlotKind.Weapon, Color.FromArgb(86, 128, 200), _inventoryViewMode == InventoryViewMode.Inventory))
         {
             _inventoryViewMode = InventoryViewMode.Inventory;
@@ -1034,18 +1304,27 @@ public sealed partial class Game
             _inventoryViewMode = InventoryViewMode.Craft;
         }
 
+        ImGui.Dummy(new Vector2(0f, 6f));
+        if (DrawInventoryModeButton("mode_upgrades", "Upgrades", InventorySlotKind.Turret, Color.FromArgb(90, 144, 196), _inventoryViewMode == InventoryViewMode.Upgrades))
+        {
+            _inventoryViewMode = InventoryViewMode.Upgrades;
+        }
+
+        ImGui.Dummy(new Vector2(0f, 12f));
         ImGui.Separator();
-        ImGui.TextDisabled("Resources");
+        DrawInventorySectionHeader("Resources", "Live values", Color.FromArgb(126, 136, 148));
         ImGui.Text($"Scrap {player.Scrap}");
         ImGui.Text($"Credits {player.Credits}");
         ImGui.Text($"Kits {player.BarricadeKits}");
         ImGui.Text($"Turrets {player.TurretCharges}/{player.MaxTurretCharges}");
         ImGui.Text($"Overdrive {(int)player.Adrenaline}%");
+        ImGui.Dummy(new Vector2(0f, 10f));
         ImGui.Separator();
-        ImGui.TextDisabled("Keys");
+        DrawInventorySectionHeader("Keys", "Fast access", Color.FromArgb(126, 136, 148));
         ImGui.TextDisabled("Tab = bag");
         ImGui.TextDisabled("C = craft");
         ImGui.TextDisabled("1-9 = hotbar");
+        ImGui.TextDisabled("E = use item");
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -1054,9 +1333,13 @@ public sealed partial class Game
         {
             DrawInventoryLoadoutPanel(screen, player, slots);
         }
-        else
+        else if (_inventoryViewMode == InventoryViewMode.Craft)
         {
             DrawCraftMenuPanel(player, recipes);
+        }
+        else
+        {
+            DrawUpgradeMenuPanel(player);
         }
         ImGui.EndChild();
         ImGui.End();
@@ -1083,16 +1366,14 @@ public sealed partial class Game
 
     private void DrawInventoryLoadoutPanel(Vector2 screen, Player player, List<InventoryViewSlot> slots)
     {
-        float gridWidth = Math.Min(752f, ImGui.GetContentRegionAvail().X * 0.64f);
+        float gridWidth = Math.Min(768f, ImGui.GetContentRegionAvail().X * 0.66f);
         ImGui.BeginChild("inv_grid", new Vector2(gridWidth, 0f), ImGuiChildFlags.Borders);
-        ImGui.TextDisabled("Quick access");
-        ImGui.SameLine();
-        ImGui.TextDisabled("1-9 mirror the slot bar at the bottom.");
-        ImGui.Spacing();
+        DrawInventorySectionHeader("Quick access", "Top row mirrors the hotbar exactly.", Color.FromArgb(96, 148, 220));
+        ImGui.Dummy(new Vector2(0f, 8f));
 
         float quickSpacing = 6f;
         float quickWidth = MathF.Floor((ImGui.GetContentRegionAvail().X - quickSpacing * 8f) / 9f);
-        float quickHeight = 64f;
+        float quickHeight = 74f;
         for (int displayIndex = 0; displayIndex < 9; displayIndex++)
         {
             int rawIndex = _inventoryLayout[displayIndex];
@@ -1109,17 +1390,15 @@ public sealed partial class Game
             HandleInventorySlotInput(displayIndex, rawIndex, slot, clicked);
         }
 
-        ImGui.Dummy(new Vector2(0f, 10f));
+        ImGui.Dummy(new Vector2(0f, 12f));
         ImGui.Separator();
-        ImGui.TextDisabled("Backpack");
-        ImGui.SameLine();
-        ImGui.TextDisabled("drag anything here, then drag it back whenever you want");
-        ImGui.Spacing();
+        DrawInventorySectionHeader("Backpack", "Everything else lives here. Drag it up when you need it.", Color.FromArgb(116, 124, 134));
+        ImGui.Dummy(new Vector2(0f, 8f));
 
         const int backpackColumns = 6;
         float packSpacing = 8f;
         float packWidth = MathF.Floor((ImGui.GetContentRegionAvail().X - packSpacing * (backpackColumns - 1)) / backpackColumns);
-        float packHeight = 76f;
+        float packHeight = 82f;
         for (int displayIndex = 9; displayIndex < 32; displayIndex++)
         {
             int rawIndex = _inventoryLayout[displayIndex];
@@ -1137,17 +1416,16 @@ public sealed partial class Game
             HandleInventorySlotInput(displayIndex, rawIndex, slot, clicked);
         }
 
+        ImGui.Dummy(new Vector2(0f, 10f));
         if (_inventoryDragRawIndex >= 0)
         {
-            ImGui.Dummy(new Vector2(0f, 8f));
             int fromDisplay = _inventoryDragRawIndex + 1;
             string hoverText = _inventoryDragHoverRawIndex >= 0 ? $" -> {_inventoryDragHoverRawIndex + 1}" : string.Empty;
             ImGui.TextDisabled($"Dragging slot {fromDisplay}{hoverText}");
-            ImGui.TextDisabled("Release over another tile to swap it. Empty slots work too.");
+            ImGui.TextDisabled("Release over another tile to swap it. Empty tiles work too.");
         }
         else
         {
-            ImGui.Dummy(new Vector2(0f, 8f));
             ImGui.TextDisabled("Hold LMB on any non-empty tile, drag, then release to swap places.");
         }
         ImGui.EndChild();
@@ -1161,22 +1439,50 @@ public sealed partial class Game
         ImGui.BeginChild("inv_detail", new Vector2(0f, 0f), ImGuiChildFlags.Borders);
         int selectedRawIndex = Math.Clamp(_inventorySelectedIndex, 0, slots.Count - 1);
         InventoryViewSlot selectedSlot = slots[selectedRawIndex];
-        int displaySlot = FindInventoryDisplayIndex(selectedRawIndex) + 1;
+        int displaySlot = FindInventoryDisplayIndex(selectedRawIndex);
+        string locationLabel = GetInventoryDisplayLocationLabel(displaySlot);
 
-        ImGui.TextColored(ToVec4(selectedSlot.Accent), selectedSlot.Title);
-        ImGui.SameLine();
-        ImGui.TextDisabled(selectedSlot.Value);
-        ImGui.SameLine();
-        ImGui.TextDisabled($"Slot {displaySlot}");
-        ImGui.Separator();
+        DrawInventoryDetailHero(selectedSlot, locationLabel, displaySlot + 1);
+        ImGui.Dummy(new Vector2(0f, 10f));
+        ImGui.PushTextWrapPos(0f);
         ImGui.TextWrapped(selectedSlot.Description);
-        ImGui.Spacing();
+        ImGui.PopTextWrapPos();
+        ImGui.Dummy(new Vector2(0f, 8f));
+
+        bool canSendToQuick = !selectedSlot.IsEmpty && displaySlot >= 9;
+        bool canSendToBag = !selectedSlot.IsEmpty && displaySlot < 9;
+        float actionWidth = (ImGui.GetContentRegionAvail().X - 8f) * 0.5f;
+        if (!canSendToQuick) ImGui.BeginDisabled();
+        if (ImGui.Button("Send to hotbar", new Vector2(actionWidth, 0f)))
+        {
+            if (TryMoveInventoryRawIndexToRange(slots, selectedRawIndex, 0, 8, GetSelectedHotbarDisplayIndex()))
+            {
+                SetAnnouncement($"{selectedSlot.Title} moved to hotbar", 0.8f);
+            }
+        }
+        if (!canSendToQuick) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (!canSendToBag) ImGui.BeginDisabled();
+        if (ImGui.Button("Send to backpack", new Vector2(-1f, 0f)))
+        {
+            if (TryMoveInventoryRawIndexToRange(slots, selectedRawIndex, 9, 31, 9))
+            {
+                SetAnnouncement($"{selectedSlot.Title} moved to backpack", 0.8f);
+            }
+        }
+        if (!canSendToBag) ImGui.EndDisabled();
+
+        ImGui.Dummy(new Vector2(0f, 10f));
+        ImGui.Separator();
+        DrawInventorySectionHeader("Details", selectedSlot.WeaponIndex >= 0 ? "Weapon data" : "Slot actions", selectedSlot.Accent);
+        ImGui.Dummy(new Vector2(0f, 6f));
 
         if (selectedSlot.WeaponIndex >= 0)
         {
             WeaponState selectedWeapon = player.Arsenal[selectedSlot.WeaponIndex];
             ImGui.TextWrapped(selectedWeapon.Definition.Description);
-            ImGui.Spacing();
+            ImGui.Dummy(new Vector2(0f, 6f));
             if (selectedWeapon.Unlocked)
             {
                 if (ImGui.Button("Equip weapon", new Vector2(-1f, 0f)))
@@ -1249,10 +1555,10 @@ public sealed partial class Game
                     break;
                 case InventorySlotKind.Empty:
                     ImGui.TextDisabled("Empty backpack space.");
-                    ImGui.TextDisabled("Drop another tile here to keep the quickbar tidy.");
+                    ImGui.TextDisabled("Drop another tile here to keep the quickbar cleaner.");
                     break;
                 default:
-                    ImGui.TextDisabled("This slot is passive. Move it wherever it feels clean.");
+                    ImGui.TextDisabled("This slot is passive. Move it wherever it keeps the layout tidy.");
                     break;
             }
 
@@ -1265,18 +1571,174 @@ public sealed partial class Game
                 DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Vitality, $"Vitality boost ({player.VitalityUpgradeRank})");
                 DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Grenades, $"Grenades boost ({player.GrenadeUpgradeRank})");
                 DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Turrets, $"Turrets boost ({player.TurretUpgradeRank})");
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Overdrive, $"Overdrive boost ({player.OverdriveUpgradeRank})");
             }
         }
 
+        ImGui.Dummy(new Vector2(0f, 10f));
         ImGui.Separator();
-        ImGui.TextDisabled("Tab = inventory · C = craft · 1-9 = hotbar · RMB still throws grenade.");
+        ImGui.TextDisabled("Tab = inventory · C = craft · 1-9 = hotbar · E = use selected item");
         ImGui.EndChild();
+    }
+
+    private void DrawInventorySectionHeader(string title, string subtitle, Color accent)
+    {
+        ImGui.TextColored(ToVec4(accent), title);
+        if (!string.IsNullOrWhiteSpace(subtitle))
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(subtitle);
+        }
+    }
+
+    private void DrawInventorySummaryPill(string text, Color accent)
+    {
+        Vector2 pos = ImGui.GetCursorScreenPos();
+        Vector2 textSize = ImGui.CalcTextSize(text);
+        Vector2 size = new Vector2(textSize.X + 28f, 26f);
+        ImGui.Dummy(size);
+        ImDrawListPtr dl = ImGui.GetWindowDrawList();
+        Vector2 min = pos;
+        Vector2 max = pos + size;
+        dl.AddRectFilled(min, max, ToU32(Color.FromArgb(118, Mix(accent, Color.Black, 0.56f))), 13f);
+        dl.AddRect(min, max, ToU32(Color.FromArgb(144, Mix(accent, Color.White, 0.18f))), 13f, ImDrawFlags.None, 1.1f);
+        dl.AddCircleFilled(new Vector2(min.X + 12f, min.Y + size.Y * 0.5f), 3.5f, ToU32(Color.FromArgb(228, accent)), 14);
+        dl.AddText(new Vector2(min.X + 20f, min.Y + 5f), ToU32(Color.FromArgb(232, 236, 242, 246)), text);
+    }
+
+    private int CountFilledDisplaySlots(List<InventoryViewSlot> slots, int startDisplayIndex, int endDisplayIndex)
+    {
+        int count = 0;
+        for (int i = Math.Max(0, startDisplayIndex); i <= Math.Min(endDisplayIndex, _inventoryLayout.Length - 1); i++)
+        {
+            int rawIndex = _inventoryLayout[i];
+            if (!slots[Math.Clamp(rawIndex, 0, slots.Count - 1)].IsEmpty)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int CountWeaponSlots(Player player)
+    {
+        int count = 0;
+        for (int i = 0; i < Math.Min(Player.ActiveWeaponSlots, player.Arsenal.Count); i++)
+        {
+            if (player.Arsenal[i].Unlocked && !player.Arsenal[i].IsEmpty)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int CountReadySupportSlots(Player player)
+    {
+        int count = 0;
+        if (player.BarricadeKits > 0) count++;
+        if (player.GrenadeCooldownTimer <= 0f) count++;
+        if (player.TurretCharges > 0) count++;
+        if (player.Adrenaline > 0f || player.IsOverdriveActive) count++;
+        return count;
+    }
+
+    private string GetInventoryDisplayLocationLabel(int displayIndex)
+    {
+        return displayIndex < 9 ? $"Quick slot {displayIndex + 1}" : $"Backpack slot {displayIndex + 1}";
+    }
+
+    private string GetHotbarSlotHelpText(Player player, int rawIndex)
+    {
+        return rawIndex switch
+        {
+            4 => "Passive resource stack for quick checks while looting.",
+            5 => "Credit tracker. Useful when you are saving for unlocks.",
+            6 => "Place cover with E when this slot is armed.",
+            7 => "Throw with E or RMB. READY means the boom is available now.",
+            8 => "Deploy on a valid tile with E.",
+            9 => player.IsOverdriveActive ? "Burst is active right now." : "Charge it, arm it, then smash E.",
+            _ => "Selected slot. Click, scroll or press a number to switch fast."
+        };
+    }
+
+    private bool TryMoveInventoryRawIndexToRange(List<InventoryViewSlot> slots, int rawIndex, int startDisplayIndex, int endDisplayIndex, int fallbackDisplayIndex)
+    {
+        if (rawIndex < 0 || rawIndex >= slots.Count || slots[rawIndex].IsEmpty)
+        {
+            return false;
+        }
+
+        int currentDisplayIndex = FindInventoryDisplayIndex(rawIndex);
+        if (currentDisplayIndex >= startDisplayIndex && currentDisplayIndex <= endDisplayIndex)
+        {
+            return false;
+        }
+
+        int targetDisplayIndex = -1;
+        for (int i = Math.Max(0, startDisplayIndex); i <= Math.Min(endDisplayIndex, _inventoryLayout.Length - 1); i++)
+        {
+            int candidateRawIndex = _inventoryLayout[i];
+            if (slots[Math.Clamp(candidateRawIndex, 0, slots.Count - 1)].IsEmpty)
+            {
+                targetDisplayIndex = i;
+                break;
+            }
+        }
+
+        if (targetDisplayIndex < 0)
+        {
+            targetDisplayIndex = Math.Clamp(fallbackDisplayIndex, startDisplayIndex, endDisplayIndex);
+        }
+
+        if (targetDisplayIndex == currentDisplayIndex)
+        {
+            return false;
+        }
+
+        (_inventoryLayout[currentDisplayIndex], _inventoryLayout[targetDisplayIndex]) = (_inventoryLayout[targetDisplayIndex], _inventoryLayout[currentDisplayIndex]);
+        _inventorySelectedIndex = rawIndex;
+        return true;
+    }
+
+    private void DrawInventoryDetailHero(InventoryViewSlot slot, string locationLabel, int displaySlot)
+    {
+        Vector2 pos = ImGui.GetCursorScreenPos();
+        Vector2 size = new Vector2(Math.Max(0f, ImGui.GetContentRegionAvail().X), 96f);
+        ImGui.Dummy(size);
+        ImDrawListPtr dl = ImGui.GetWindowDrawList();
+        Vector2 min = pos;
+        Vector2 max = pos + size;
+        Color accent = slot.IsEmpty ? Color.FromArgb(92, 100, 110) : slot.Accent;
+        dl.AddRectFilled(min, max, ToU32(Color.FromArgb(128, Mix(accent, Color.Black, 0.52f))), 16f);
+        dl.AddRect(min, max, ToU32(Color.FromArgb(166, Mix(accent, Color.White, 0.2f))), 16f, ImDrawFlags.None, 1.2f);
+        if (!slot.IsEmpty)
+        {
+            DrawInventoryLineAccent(dl, min, max, accent, 16f, true);
+        }
+
+        RectangleF iconRect = new RectangleF(min.X + 16f, min.Y + 18f, 30f, 30f);
+        DrawInventoryIcon(dl, iconRect, slot);
+        dl.AddText(new Vector2(iconRect.Right + 12f, min.Y + 16f), ToU32(Color.FromArgb(238, 238, 244, 248)), slot.Title);
+        dl.AddText(new Vector2(iconRect.Right + 12f, min.Y + 44f), ToU32(Color.FromArgb(214, 214, 222, 232)), string.IsNullOrWhiteSpace(slot.Value) ? "—" : slot.Value);
+
+        string badge = $"#{displaySlot:00}";
+        Vector2 badgeSize = ImGui.CalcTextSize(badge);
+        Vector2 badgeMin = new Vector2(max.X - badgeSize.X - 44f, min.Y + 16f);
+        Vector2 badgeMax = new Vector2(max.X - 16f, min.Y + 40f);
+        dl.AddRectFilled(badgeMin, badgeMax, ToU32(Color.FromArgb(120, Mix(accent, Color.Black, 0.36f))), 11f);
+        dl.AddRect(badgeMin, badgeMax, ToU32(Color.FromArgb(160, Mix(accent, Color.White, 0.22f))), 11f, ImDrawFlags.None, 1f);
+        dl.AddText(new Vector2(badgeMin.X + 12f, badgeMin.Y + 4f), ToU32(Color.FromArgb(236, 236, 242, 246)), badge);
+        dl.AddText(new Vector2(min.X + 16f, min.Y + 64f), ToU32(Color.FromArgb(196, 206, 214, 224)), locationLabel);
     }
 
     private List<CraftRecipeView> BuildCraftRecipes(Player player)
     {
         return new List<CraftRecipeView>
         {
+            new CraftRecipeView(player.GetWeaponState("SMG")?.Unlocked == true ? "SMG crafted" : "SMG frame", "4 scrap + 40 cr", "Unlock the SMG and make it appear in the inventory and hotbar pool.", player.GetWeaponState("SMG")?.Unlocked == true ? "Already crafted" : "Craft SMG", Color.FromArgb(76, 164, 148), InventorySlotKind.Weapon),
+            new CraftRecipeView(player.GetWeaponState("SHOTGUN")?.Unlocked == true ? "Shotgun crafted" : "Shotgun frame", "6 scrap + 80 cr", "Unlock the shotgun and add it to the bag for dragging or hotbar use.", player.GetWeaponState("SHOTGUN")?.Unlocked == true ? "Already crafted" : "Craft shotgun", Color.FromArgb(182, 124, 72), InventorySlotKind.Weapon),
+            new CraftRecipeView(player.GetWeaponState("CARBINE")?.Unlocked == true ? "Carbine crafted" : "Carbine frame", "8 scrap + 110 cr", "Unlock the carbine and drop it into your inventory roster.", player.GetWeaponState("CARBINE")?.Unlocked == true ? "Already crafted" : "Craft carbine", Color.FromArgb(132, 98, 184), InventorySlotKind.Weapon),
             new CraftRecipeView("Barricade kit", $"{_scrapCraftCost} scrap", "Build one barricade kit you can place straight from the hotbar.", "Craft barricade kit", Color.FromArgb(150, 106, 70), InventorySlotKind.Barricade),
             new CraftRecipeView("Ammo cache", "3 scrap", "Top up reserve ammo across your unlocked weapons.", "Pack ammo cache", Color.FromArgb(206, 156, 74), InventorySlotKind.Weapon),
             new CraftRecipeView("Armor plate", "2 scrap + 8 cr", "Patch 24 armor instantly. Good when a wave is about to slap you.", "Patch armor", Color.FromArgb(88, 118, 200), InventorySlotKind.Armor),
@@ -1338,6 +1800,86 @@ public sealed partial class Game
         ImGui.EndChild();
     }
 
+    private void DrawUpgradeMenuPanel(Player player)
+    {
+        List<UpgradeWorkbenchView> entries = BuildUpgradeWorkbenchEntries(player);
+        _upgradeWorkbenchIndex = Math.Clamp(_upgradeWorkbenchIndex, 0, entries.Count - 1);
+        UpgradeWorkbenchView selected = entries[_upgradeWorkbenchIndex];
+
+        float listWidth = Math.Min(420f, ImGui.GetContentRegionAvail().X * 0.38f);
+        ImGui.BeginChild("upgrade_list", new Vector2(listWidth, 0f), ImGuiChildFlags.Borders);
+        ImGui.TextDisabled("Support workshop");
+        ImGui.Spacing();
+        ImGui.TextWrapped("Pick what you want to improve first. Left side is the gear category, right side is the nasty upgrade stuff.");
+        ImGui.Spacing();
+
+        const int upgradeColumns = 3;
+        float spacing = 10f;
+        float tileWidth = MathF.Floor((ImGui.GetContentRegionAvail().X - spacing * (upgradeColumns - 1)) / upgradeColumns);
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (i % upgradeColumns != 0)
+            {
+                ImGui.SameLine();
+            }
+
+            if (DrawUpgradeWorkbenchTile($"upgrade_tile_{i}", entries[i], new Vector2(tileWidth, 64f), _upgradeWorkbenchIndex == i))
+            {
+                _upgradeWorkbenchIndex = i;
+            }
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled("Resources");
+        ImGui.Text($"Credits {player.Credits}");
+        ImGui.Text($"Scrap {player.Scrap}");
+        ImGui.EndChild();
+
+        ImGui.SameLine();
+
+        ImGui.BeginChild("upgrade_detail", new Vector2(0f, 0f), ImGuiChildFlags.Borders);
+        ImGui.TextColored(ToVec4(selected.Accent), selected.Title);
+        ImGui.SameLine();
+        ImGui.TextDisabled(selected.Subtitle);
+        ImGui.Separator();
+        ImGui.TextWrapped(selected.Description);
+        ImGui.Spacing();
+        DrawSelectedUpgradeWorkbenchDetail(player, _upgradeWorkbenchIndex);
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled("Craft tab makes the item. Upgrade tab makes it meaner.");
+        ImGui.EndChild();
+    }
+
+    private void DrawInventoryLineAccent(ImDrawListPtr dl, Vector2 min, Vector2 max, Color accent, float rounding, bool emphasized)
+    {
+        float width = max.X - min.X;
+        if (width <= 20f)
+        {
+            return;
+        }
+
+        float y = min.Y + 8f;
+        float pad = 9f;
+        float segment = MathF.Max(16f, MathF.Min(width * 0.24f, 42f));
+        float thickness = emphasized ? 2.4f : 1.7f;
+        uint lineColor = ToU32(Color.FromArgb(emphasized ? 232 : 188, accent));
+        uint ghostColor = ToU32(Color.FromArgb(72, Mix(accent, Color.White, 0.24f)));
+
+        dl.AddLine(new Vector2(min.X + pad, y), new Vector2(min.X + pad + segment, y), ghostColor, thickness + 1f);
+        dl.AddLine(new Vector2(max.X - pad - segment, y), new Vector2(max.X - pad, y), ghostColor, thickness + 1f);
+        dl.AddLine(new Vector2(min.X + pad, y), new Vector2(min.X + pad + segment, y), lineColor, thickness);
+        dl.AddLine(new Vector2(max.X - pad - segment, y), new Vector2(max.X - pad, y), lineColor, thickness);
+
+        if (emphasized)
+        {
+            dl.AddCircleFilled(new Vector2(min.X + pad + segment + 7f, y), 2.2f, ToU32(Color.FromArgb(228, accent)), 12);
+        }
+
+        dl.AddLine(new Vector2(min.X + rounding * 0.55f, min.Y + 1.5f), new Vector2(max.X - rounding * 0.55f, min.Y + 1.5f), ToU32(Color.FromArgb(44, accent)), 1f);
+    }
+
     private bool DrawInventoryModeButton(string id, string label, InventorySlotKind kind, Color accent, bool active)
     {
         Vector2 size = new Vector2(Math.Max(48f, ImGui.GetContentRegionAvail().X), 56f);
@@ -1354,6 +1896,88 @@ public sealed partial class Game
         dl.AddText(new Vector2(min.X + 38f, min.Y + 18f), ToU32(Color.FromArgb(236, 236, 242, 246)), label);
         ImGui.PopID();
         return clicked;
+    }
+
+    private List<UpgradeWorkbenchView> BuildUpgradeWorkbenchEntries(Player player)
+    {
+        return new List<UpgradeWorkbenchView>
+        {
+            new UpgradeWorkbenchView("Barricade", $"Tech {_barricadeTechLevel}/3", "Cheaper barricade crafting and one free barricade kit every time you improve the engineering line.", Color.FromArgb(150, 106, 70), InventorySlotKind.Barricade),
+            new UpgradeWorkbenchView("Turret", $"Rank {player.TurretUpgradeRank}", "More turret power and better charge utility for when the wave gets rude.", Color.FromArgb(76, 144, 182), InventorySlotKind.Turret),
+            new UpgradeWorkbenchView("Grenade", $"Rank {player.GrenadeUpgradeRank}", "Push grenade handling harder so the cooldown hurts less and the boom matters more.", Color.FromArgb(190, 126, 68), InventorySlotKind.Grenade),
+            new UpgradeWorkbenchView("Overdrive", $"Rank {player.OverdriveUpgradeRank}", "Stretch your overdrive duration and make the panic button feel like a proper steroid shot.", Color.FromArgb(214, 134, 72), InventorySlotKind.Overdrive),
+            new UpgradeWorkbenchView("Weapons", $"DMG {player.DamageUpgradeRank} · FR {player.FireRateUpgradeRank}", "Core weapon handling: more damage, faster fire, quicker reload. Pure murder math.", Color.FromArgb(120, 96, 176), InventorySlotKind.Weapon),
+            new UpgradeWorkbenchView("Mobility", $"Move {player.MoveSpeed:0}", "Movement and survival upgrades so you keep your ass attached during bad waves.", Color.FromArgb(86, 128, 200), InventorySlotKind.Health)
+        };
+    }
+
+    private bool DrawUpgradeWorkbenchTile(string id, UpgradeWorkbenchView entry, Vector2 size, bool selected)
+    {
+        ImGui.PushID(id);
+        bool clicked = ImGui.InvisibleButton("##upgradetile", size);
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        ImDrawListPtr dl = ImGui.GetWindowDrawList();
+        Color panel = Color.FromArgb(selected ? 148 : 108, Mix(entry.Accent, Color.Black, 0.46f));
+        dl.AddRectFilled(min, max, ToU32(panel), 12f);
+        dl.AddRect(min, max, ToU32(Color.FromArgb(selected ? 214 : 128, selected ? Mix(entry.Accent, Color.White, 0.5f) : Mix(entry.Accent, Color.White, 0.16f))), 12f, ImDrawFlags.None, selected ? 1.6f : 1.1f);
+        InventoryViewSlot iconSlot = new InventoryViewSlot(entry.Title, entry.Subtitle, entry.Description, entry.Accent, entry.IconKind);
+        DrawInventoryIcon(dl, new RectangleF(min.X + 12f, min.Y + 12f, 18f, 18f), iconSlot);
+        dl.AddText(new Vector2(min.X + 38f, min.Y + 10f), ToU32(Color.FromArgb(238, 238, 243, 246)), entry.Title);
+        dl.AddText(new Vector2(min.X + 12f, min.Y + 36f), ToU32(Color.FromArgb(214, 214, 221, 230)), entry.Subtitle);
+        ImGui.PopID();
+        return clicked;
+    }
+
+    private void DrawSelectedUpgradeWorkbenchDetail(Player player, int selectedIndex)
+    {
+        switch (selectedIndex)
+        {
+            case 0:
+                {
+                    int barricadeTechCost = GetBarricadeTechCost();
+                    bool canBuyBarricadeTech = player.Credits >= barricadeTechCost && _barricadeTechLevel < 3;
+                    if (!canBuyBarricadeTech) ImGui.BeginDisabled();
+                    if (ImGui.Button($"Barricade engineering ({_barricadeTechLevel}/3) - {barricadeTechCost} cr", new Vector2(-1f, 0f)))
+                    {
+                        TryBuyBarricadeTech(player);
+                    }
+                    if (!canBuyBarricadeTech) ImGui.EndDisabled();
+                    ImGui.Text($"Current barricade craft cost: {_scrapCraftCost} scrap");
+                    ImGui.Text($"Kits in inventory: {player.BarricadeKits}");
+                    ImGui.TextWrapped("Every rank drops one free barricade kit into the inventory and lowers future craft cost.");
+                    break;
+                }
+            case 1:
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Turrets, $"Turret systems ({player.TurretUpgradeRank})");
+                ImGui.Text($"Charges {player.TurretCharges}/{player.MaxTurretCharges}");
+                ImGui.TextWrapped("This line is for stronger turret support and charge economy.");
+                break;
+            case 2:
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Grenades, $"Grenade systems ({player.GrenadeUpgradeRank})");
+                ImGui.Text($"Cooldown {player.GrenadeCooldownDuration:0.0}s");
+                ImGui.TextWrapped("Grenades get nastier and more usable instead of feeling like decorative pocket rocks.");
+                break;
+            case 3:
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Overdrive, $"Overdrive systems ({player.OverdriveUpgradeRank})");
+                ImGui.Text($"Duration {player.OverdriveDuration:0.0}s");
+                ImGui.Text($"Meter {(int)player.Adrenaline}%");
+                ImGui.TextWrapped("Longer overdrive means more time to bully the wave before it bullies you.");
+                break;
+            case 4:
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Damage, $"Damage boost ({player.DamageUpgradeRank})");
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.FireRate, $"Fire rate boost ({player.FireRateUpgradeRank})");
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Reload, $"Reload boost ({player.ReloadUpgradeRank})");
+                ImGui.Text($"Damage x{player.DamageMultiplier:0.00}   Fire x{player.FireRateMultiplier:0.00}");
+                ImGui.Text($"Reload x{player.ReloadSpeedMultiplier:0.00}");
+                break;
+            default:
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Mobility, $"Mobility boost ({player.MobilityUpgradeRank})");
+                DrawPlayerUpgradeButton(player, PlayerUpgradeKind.Vitality, $"Vitality boost ({player.VitalityUpgradeRank})");
+                ImGui.Text($"Move {player.MoveSpeed:0}");
+                ImGui.Text($"HP {player.Health}/{player.MaxHealth}   Armor {player.Armor}/100");
+                break;
+        }
     }
 
     private bool DrawCraftRecipeTile(string id, CraftRecipeView recipe, Vector2 size, bool selected)
@@ -1412,7 +2036,7 @@ public sealed partial class Game
         Vector2 max = ImGui.GetItemRectMax();
         ImDrawListPtr dl = ImGui.GetWindowDrawList();
         Color accent = slot.IsEmpty ? Color.FromArgb(92, 100, 110) : slot.Accent;
-        Color panel = slot.IsEmpty ? Color.FromArgb(86, 34, 40, 48) : Color.FromArgb(compact ? 118 : 102, Mix(accent, Color.Black, 0.42f));
+        Color panel = slot.IsEmpty ? Color.FromArgb(88, 30, 36, 44) : Color.FromArgb(compact ? 122 : 108, Mix(accent, Color.Black, 0.48f));
         if (selected)
         {
             panel = Mix(panel, Color.White, 0.08f);
@@ -1422,20 +2046,135 @@ public sealed partial class Game
             panel = Mix(accent, Color.White, 0.24f);
         }
 
-        float rounding = compact ? 10f : 12f;
+        float rounding = compact ? 12f : 14f;
+        dl.AddRectFilled(min + new Vector2(0f, 3f), max + new Vector2(0f, 3f), ToU32(Color.FromArgb(42, 0, 0, 0)), rounding);
+        if (selected)
+        {
+            dl.AddRectFilled(min + new Vector2(-1f, -1f), max + new Vector2(1f, 1f), ToU32(Color.FromArgb(36, accent)), rounding + 1f);
+        }
         dl.AddRectFilled(min, max, ToU32(panel), rounding);
-        dl.AddRect(min, max, ToU32(Color.FromArgb(selected ? 210 : 132, selected ? Mix(accent, Color.White, 0.55f) : Mix(accent, Color.White, 0.12f))), rounding, ImDrawFlags.None, selected ? 1.6f : 1.1f);
+        dl.AddRect(min, max, ToU32(Color.FromArgb(selected ? 214 : 130, selected ? Mix(accent, Color.White, 0.56f) : Mix(accent, Color.White, 0.14f))), rounding, ImDrawFlags.None, selected ? 1.7f : 1.1f);
+        if (!slot.IsEmpty)
+        {
+            DrawInventoryLineAccent(dl, min, max, accent, rounding, selected || dragging);
+        }
         if (dropTarget)
         {
             dl.AddRect(min + new Vector2(2f, 2f), max - new Vector2(2f, 2f), ToU32(Color.FromArgb(220, 132, 216, 255)), rounding - 2f, ImDrawFlags.None, 2f);
         }
 
-        RectangleF iconRect = new RectangleF(min.X + 8f, min.Y + 8f, compact ? 18f : 20f, compact ? 18f : 20f);
-        DrawInventoryIcon(dl, iconRect, slot);
-        float textX = iconRect.Right + 8f;
-        dl.AddText(new Vector2(min.X + 8f, min.Y + 4f), ToU32(Color.FromArgb(210, 180, 188, 196)), caption);
-        dl.AddText(new Vector2(textX, min.Y + 8f), ToU32(Color.FromArgb(236, 236, 242, 246)), compact ? GetCompactSlotTitle(slot) : slot.Title);
-        dl.AddText(new Vector2(textX, compact ? min.Y + 31f : min.Y + size.Y - 22f), ToU32(Color.FromArgb(214, 214, 221, 230)), compact ? GetCompactSlotValue(slot) : slot.Value);
+        Vector2 badgeTextPos = new Vector2(min.X + 10f, min.Y + 7f);
+        dl.AddText(badgeTextPos, ToU32(Color.FromArgb(218, 198, 206, 214)), caption);
+
+        RectangleF iconRect = compact
+            ? new RectangleF(min.X + 10f, min.Y + 28f, 18f, 18f)
+            : new RectangleF(min.X + 10f, min.Y + 28f, 20f, 20f);
+        if (!slot.IsEmpty)
+        {
+            DrawInventoryIcon(dl, iconRect, slot);
+        }
+
+        string title = slot.IsEmpty ? string.Empty : (compact ? GetCompactSlotTitle(slot) : slot.Title);
+        string value = slot.IsEmpty ? string.Empty : (compact ? GetCompactSlotValue(slot) : slot.Value);
+        float textX = slot.IsEmpty ? min.X + 10f : iconRect.Right + 8f;
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            dl.AddText(new Vector2(textX, min.Y + 28f), ToU32(Color.FromArgb(236, 236, 242, 246)), title);
+        }
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            dl.AddText(new Vector2(textX, max.Y - 24f), ToU32(Color.FromArgb(214, 214, 221, 230)), value);
+        }
+
+        if (slot.Highlighted)
+        {
+            dl.AddCircleFilled(new Vector2(max.X - 12f, min.Y + 14f), 3.5f, ToU32(Color.FromArgb(228, 236, 198, 96)), 12);
+        }
+
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.BeginTooltip();
+            ImGui.TextColored(ToVec4(accent), slot.Title);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                ImGui.TextDisabled(value);
+            }
+            ImGui.PushTextWrapPos(340f);
+            ImGui.TextUnformatted(slot.Description);
+            ImGui.PopTextWrapPos();
+            ImGui.EndTooltip();
+        }
+
+        ImGui.PopID();
+        return clicked;
+    }
+
+    private bool DrawHotbarTile(string id, InventoryViewSlot slot, Vector2 size, int displayIndex, bool active)
+    {
+        ImGui.PushID(id);
+        bool clicked = ImGui.InvisibleButton("##hotbar_tile", size);
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        ImDrawListPtr dl = ImGui.GetWindowDrawList();
+        Color accent = slot.IsEmpty ? Color.FromArgb(92, 100, 110) : slot.Accent;
+        Color panel = slot.IsEmpty ? Color.FromArgb(96, 28, 34, 42) : Color.FromArgb(active ? 156 : 126, Mix(accent, Color.Black, active ? 0.32f : 0.46f));
+
+        dl.AddRectFilled(min + new Vector2(0f, 4f), max + new Vector2(0f, 4f), ToU32(Color.FromArgb(42, 0, 0, 0)), 14f);
+        dl.AddRectFilled(min, max, ToU32(panel), 14f);
+        if (active && !slot.IsEmpty)
+        {
+            DrawInventoryLineAccent(dl, min, max, accent, 14f, true);
+        }
+        dl.AddRect(min, max, ToU32(Color.FromArgb(active ? 228 : 138, active ? Mix(accent, Color.White, 0.56f) : Mix(accent, Color.White, 0.16f))), 14f, ImDrawFlags.None, active ? 1.8f : 1.1f);
+
+        string badgeText = (displayIndex + 1).ToString();
+        Vector2 badgeTextPos = new Vector2(min.X + 10f, min.Y + 7f);
+        dl.AddText(badgeTextPos, ToU32(Color.FromArgb(224, 204, 212, 220)), badgeText);
+
+        RectangleF iconRect = new RectangleF(min.X + 10f, min.Y + 28f, 18f, 18f);
+        if (!slot.IsEmpty)
+        {
+            DrawInventoryIcon(dl, iconRect, slot);
+        }
+
+        string title = slot.IsEmpty ? string.Empty : GetCompactSlotTitle(slot);
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            Vector2 titleSize = ImGui.CalcTextSize(title);
+            float titleX = MathF.Max(min.X + 8f, MathF.Min(max.X - titleSize.X - 8f, iconRect.Right + 6f));
+            dl.AddText(new Vector2(titleX, min.Y + 28f), ToU32(Color.FromArgb(238, 238, 244, 248)), title);
+        }
+
+        string value = slot.IsEmpty ? string.Empty : GetCompactSlotValue(slot);
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            Vector2 valueSize = ImGui.CalcTextSize(value);
+            dl.AddText(new Vector2(max.X - valueSize.X - 8f, max.Y - 22f), ToU32(Color.FromArgb(216, 214, 222, 232)), value);
+        }
+
+        if (active)
+        {
+            Vector2 activeMin = new Vector2(min.X + 8f, max.Y - 22f);
+            Vector2 activeMax = new Vector2(min.X + 48f, max.Y - 6f);
+            dl.AddRectFilled(activeMin, activeMax, ToU32(Color.FromArgb(120, Mix(accent, Color.Black, 0.18f))), 8f);
+            dl.AddText(new Vector2(activeMin.X + 7f, activeMin.Y + 1f), ToU32(Color.FromArgb(238, 238, 244, 248)), "ARM");
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.BeginTooltip();
+            ImGui.TextColored(ToVec4(accent), GetCompactSlotTitle(slot));
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                ImGui.TextDisabled(value);
+            }
+            ImGui.PushTextWrapPos(300f);
+            ImGui.TextUnformatted(slot.Description);
+            ImGui.PopTextWrapPos();
+            ImGui.EndTooltip();
+        }
+
         ImGui.PopID();
         return clicked;
     }

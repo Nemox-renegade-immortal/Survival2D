@@ -27,6 +27,8 @@ public sealed class NetworkServer : IDisposable
         public string? PendingPlayerSnapshotJson;
         public string? PendingWorldSnapshotJson;
         public Task? WriterTask;
+        public DateTime AuthoritativeStateUntilUtc = DateTime.MinValue;
+        public string SessionId = string.Empty;
         public volatile bool IsClosed;
     }
 
@@ -40,14 +42,14 @@ public sealed class NetworkServer : IDisposable
     private int _tick;
     private int _worldTick;
     private int _nextId = 1;
-    private NetPlayerState _hostState = new NetPlayerState { PlayerId = 0, Callsign = "HOST", AccentArgb = unchecked((int)0xFF5CD8FF), WeaponName = "Pistol", WeaponLevel = 1 };
+    private NetPlayerState _hostState = CreateDefaultPlayerState(0, "HOST", unchecked((int)0xFF5CD8FF));
     private NetWorldState _hostWorldState = new NetWorldState();
 
     public int Port { get; }
     public int MaxPlayers { get; }
     public int MapSeed { get; }
-    public int PlayerSnapshotRateHz { get; } = 20;
-    public int WorldSnapshotRateHz { get; } = 8;
+    public int PlayerSnapshotRateHz { get; } = 60;
+    public int WorldSnapshotRateHz { get; } = 24;
     public bool IsRunning => _listener is not null;
     public string Status { get; private set; } = "offline";
 
@@ -76,8 +78,9 @@ public sealed class NetworkServer : IDisposable
     {
         lock (_sync)
         {
-            _hostState = state?.Clone() ?? new NetPlayerState();
+            _hostState = state?.Clone() ?? CreateDefaultPlayerState(0, "HOST", unchecked((int)0xFF5CD8FF));
             _hostState.PlayerId = 0;
+            ClampPlayerState(_hostState);
         }
     }
 
@@ -130,6 +133,8 @@ public sealed class NetworkServer : IDisposable
             damage -= absorbed;
             peer.State.Health = Math.Max(0, peer.State.Health - damage);
             peer.State.IsAlive = peer.State.Health > 0;
+            MarkPeerAuthoritative(peer);
+            ClampPlayerState(peer.State);
             return true;
         }
     }
@@ -146,16 +151,63 @@ public sealed class NetworkServer : IDisposable
             switch (type)
             {
                 case PickupType.Medkit:
-                    peer.State.Health = Math.Min(100, peer.State.Health + Math.Max(0, value));
+                    peer.State.Health = Math.Min(Math.Max(1, peer.State.MaxHealth), peer.State.Health + Math.Max(0, value));
                     peer.State.IsAlive = peer.State.Health > 0;
+                    break;
+                case PickupType.Ammo:
+                    peer.State.CurrentWeaponAmmoReserve += ResolveAmmoPickupAmount(peer.State, value);
                     break;
                 case PickupType.Armor:
                     peer.State.Armor = Math.Max(0, peer.State.Armor + Math.Max(0, value));
                     break;
+                case PickupType.Credits:
+                    peer.State.Credits = Math.Max(0, peer.State.Credits + Math.Max(0, value));
+                    break;
+                case PickupType.Adrenaline:
+                    peer.State.Adrenaline = MathF.Min(Math.Max(1f, peer.State.MaxAdrenaline), peer.State.Adrenaline + Math.Max(0f, value));
+                    break;
             }
 
+            MarkPeerAuthoritative(peer);
             peer.State.PickupAnimation = Math.Max(peer.State.PickupAnimation, 0.45f);
             peer.State.PickupSequence++;
+            ClampPlayerState(peer.State);
+            return true;
+        }
+    }
+
+    public bool TryApplyScrapToPlayer(int playerId, int value)
+    {
+        lock (_sync)
+        {
+            if (!_clients.TryGetValue(playerId, out ClientPeer? peer))
+            {
+                return false;
+            }
+
+            peer.State.Scrap = Math.Max(0, peer.State.Scrap + Math.Max(0, value));
+            MarkPeerAuthoritative(peer);
+            peer.State.PickupAnimation = Math.Max(peer.State.PickupAnimation, 0.45f);
+            peer.State.PickupSequence++;
+            ClampPlayerState(peer.State);
+            return true;
+        }
+    }
+
+    public bool TryAwardKillToPlayer(int playerId, int reward)
+    {
+        lock (_sync)
+        {
+            if (!_clients.TryGetValue(playerId, out ClientPeer? peer))
+            {
+                return false;
+            }
+
+            peer.State.Kills = Math.Max(0, peer.State.Kills + 1);
+            peer.State.Credits = Math.Max(0, peer.State.Credits + 2 + Math.Max(0, reward / 10));
+            peer.State.Adrenaline = MathF.Min(Math.Max(1f, peer.State.MaxAdrenaline), peer.State.Adrenaline + 8f + reward * 0.1f);
+            MarkPeerAuthoritative(peer);
+            ClampPlayerState(peer.State);
             return true;
         }
     }
@@ -218,14 +270,7 @@ public sealed class NetworkServer : IDisposable
             Client = tcpClient,
             Reader = new StreamReader(tcpClient.GetStream()),
             Writer = new StreamWriter(tcpClient.GetStream()) { AutoFlush = true },
-            State = new NetPlayerState
-            {
-                PlayerId = assignedId,
-                Callsign = "P" + assignedId,
-                AccentArgb = unchecked((int)0xFFC0C0C0),
-                WeaponName = "Pistol",
-                WeaponLevel = 1
-            }
+            State = CreateDefaultPlayerState(assignedId, "P" + assignedId, unchecked((int)0xFFC0C0C0))
         };
 
         peer.WriterTask = Task.Run(() => WriterLoopAsync(peer));
@@ -282,6 +327,11 @@ public sealed class NetworkServer : IDisposable
                         {
                             peer.State.Callsign = hello.Callsign.Trim();
                         }
+
+                        if (hello is not null && !string.IsNullOrWhiteSpace(hello.SessionId))
+                        {
+                            peer.SessionId = hello.SessionId.Trim();
+                        }
                     }
                     else if (string.Equals(kind, "state", StringComparison.OrdinalIgnoreCase))
                     {
@@ -294,6 +344,12 @@ public sealed class NetworkServer : IDisposable
                                 state.Callsign = peer.State.Callsign;
                             }
 
+                            if (DateTime.UtcNow < peer.AuthoritativeStateUntilUtc)
+                            {
+                                PreserveAuthoritativeProgress(state, peer.State);
+                            }
+
+                            ClampPlayerState(state);
                             peer.State = state;
                         }
                     }
@@ -379,7 +435,7 @@ public sealed class NetworkServer : IDisposable
         {
             while (!_cts.IsCancellationRequested)
             {
-                await Task.Delay(10, _cts.Token).ConfigureAwait(false);
+                await Task.Delay(4, _cts.Token).ConfigureAwait(false);
 
                 DateTime now = DateTime.UtcNow;
                 List<int> staleIds = new List<int>();
@@ -405,14 +461,14 @@ public sealed class NetworkServer : IDisposable
                 {
                     string playerJson = JsonSerializer.Serialize(BuildPlayerSnapshot(), _jsonOptions);
                     BroadcastLatestPlayerSnapshot(playerJson);
-                    nextPlayerBroadcastUtc = now.AddMilliseconds(playerIntervalMs);
+                    nextPlayerBroadcastUtc = AdvanceNextBroadcast(nextPlayerBroadcastUtc, now, playerIntervalMs);
                 }
 
                 if (now >= nextWorldBroadcastUtc)
                 {
                     string worldJson = JsonSerializer.Serialize(BuildWorldSnapshot(), _jsonOptions);
                     BroadcastLatestWorldSnapshot(worldJson);
-                    nextWorldBroadcastUtc = now.AddMilliseconds(worldIntervalMs);
+                    nextWorldBroadcastUtc = AdvanceNextBroadcast(nextWorldBroadcastUtc, now, worldIntervalMs);
                 }
             }
         }
@@ -490,6 +546,120 @@ public sealed class NetworkServer : IDisposable
 
             peer.SendSignal.Release();
         }
+    }
+
+    private static NetPlayerState CreateDefaultPlayerState(int playerId, string callsign, int accentArgb)
+    {
+        Weapon weapon = WeaponCatalog.FindByName("Pistol") ?? WeaponCatalog.Rifle;
+        int clipSize = Math.Max(1, weapon.ClipSize);
+        int reserve = Math.Max(0, weapon.StartingReserve);
+
+        return new NetPlayerState
+        {
+            PlayerId = playerId,
+            Callsign = callsign,
+            AccentArgb = accentArgb,
+            WeaponName = weapon.Name,
+            WeaponLevel = 1,
+            WeaponSlot = 0,
+            SelectedHotbarRawIndex = 0,
+            CurrentWeaponAmmoInClip = clipSize,
+            CurrentWeaponAmmoReserve = reserve,
+            Health = 100,
+            MaxHealth = 100,
+            Armor = 0,
+            IsAlive = true,
+            Credits = 0,
+            Scrap = 0,
+            BarricadeKits = 0,
+            Kills = 0,
+            TurretCharges = 0,
+            MaxTurretCharges = 1,
+            Adrenaline = 0f,
+            MaxAdrenaline = 100f,
+            MoveX = 0f,
+            MoveY = 0f,
+            MoveBlend = 0f,
+            ClientStateRevision = 0,
+            FireTimer = 0f,
+            IsReloading = false,
+            ReloadTimer = 0f,
+            IsOverdriveActive = false,
+            ShootAnimation = 0f,
+            PickupAnimation = 0f,
+            UseAnimation = 0f,
+            ReloadAnimation = 0f,
+            ShotSequence = 0,
+            GrenadeSequence = 0,
+            TurretSequence = 0,
+            BarricadeSequence = 0,
+            OverdriveSequence = 0,
+            PickupSequence = 0
+        };
+    }
+
+    private static DateTime AdvanceNextBroadcast(DateTime scheduledUtc, DateTime nowUtc, int intervalMs)
+    {
+        DateTime nextUtc = scheduledUtc.AddMilliseconds(intervalMs);
+        if (nextUtc <= nowUtc)
+        {
+            nextUtc = nowUtc.AddMilliseconds(intervalMs);
+        }
+
+        return nextUtc;
+    }
+
+    private static int ResolveAmmoPickupAmount(NetPlayerState state, int value)
+    {
+        if (value > 1)
+        {
+            return value;
+        }
+
+        Weapon? weapon = WeaponCatalog.FindByName(state.WeaponName);
+        return Math.Max(8, weapon?.AmmoPickupAmount ?? 24);
+    }
+
+    private static void PreserveAuthoritativeProgress(NetPlayerState incoming, NetPlayerState authoritative)
+    {
+        incoming.Health = authoritative.Health;
+        incoming.MaxHealth = authoritative.MaxHealth;
+        incoming.Armor = authoritative.Armor;
+        incoming.IsAlive = authoritative.IsAlive;
+        incoming.Credits = authoritative.Credits;
+        incoming.Scrap = authoritative.Scrap;
+        incoming.BarricadeKits = authoritative.BarricadeKits;
+        incoming.Kills = authoritative.Kills;
+        incoming.TurretCharges = authoritative.TurretCharges;
+        incoming.MaxTurretCharges = authoritative.MaxTurretCharges;
+        incoming.Adrenaline = authoritative.Adrenaline;
+        incoming.MaxAdrenaline = authoritative.MaxAdrenaline;
+        incoming.CurrentWeaponAmmoInClip = authoritative.CurrentWeaponAmmoInClip;
+        incoming.CurrentWeaponAmmoReserve = authoritative.CurrentWeaponAmmoReserve;
+        incoming.WeaponStateSequence = Math.Max(incoming.WeaponStateSequence, authoritative.WeaponStateSequence);
+    }
+
+    private static void ClampPlayerState(NetPlayerState state)
+    {
+        state.MaxHealth = Math.Max(1, state.MaxHealth);
+        state.Health = Math.Clamp(state.Health, 0, state.MaxHealth);
+        state.Armor = Math.Max(0, state.Armor);
+        state.Credits = Math.Max(0, state.Credits);
+        state.Scrap = Math.Max(0, state.Scrap);
+        state.BarricadeKits = Math.Max(0, state.BarricadeKits);
+        state.Kills = Math.Max(0, state.Kills);
+        state.MaxTurretCharges = Math.Max(1, state.MaxTurretCharges);
+        state.TurretCharges = Math.Clamp(state.TurretCharges, 0, state.MaxTurretCharges);
+        state.MaxAdrenaline = MathF.Max(1f, state.MaxAdrenaline);
+        state.Adrenaline = Math.Clamp(state.Adrenaline, 0f, state.MaxAdrenaline);
+        state.CurrentWeaponAmmoInClip = Math.Max(0, state.CurrentWeaponAmmoInClip);
+        state.CurrentWeaponAmmoReserve = Math.Max(0, state.CurrentWeaponAmmoReserve);
+        state.IsAlive = state.Health > 0;
+    }
+
+    private static void MarkPeerAuthoritative(ClientPeer peer)
+    {
+        peer.AuthoritativeStateUntilUtc = DateTime.UtcNow.AddMilliseconds(900);
     }
 
     private void EnqueueReliable<T>(ClientPeer peer, T payload)

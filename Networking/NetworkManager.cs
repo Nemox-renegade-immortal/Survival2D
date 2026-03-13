@@ -16,6 +16,8 @@ public enum NetMode
 public sealed class NetworkManager : IDisposable
 {
     private readonly LanDiscoveryService _lanDiscovery = new LanDiscoveryService();
+    private readonly string _clientSessionId = Guid.NewGuid().ToString("N");
+    private int _localStateRevision;
     private NetworkServer? _server;
     private NetworkClient? _client;
 
@@ -56,6 +58,7 @@ public sealed class NetworkManager : IDisposable
         Port = port;
         MaxPlayers = maxPlayers;
         LocalPlayerId = 0;
+        _localStateRevision = 0;
         MapSeed = mapSeed ?? unchecked((int)(DateTime.UtcNow.Ticks & 0x7FFFFFFF));
         if (MapSeed == 0)
         {
@@ -84,8 +87,9 @@ public sealed class NetworkManager : IDisposable
         Stop();
         HostAddress = hostAddress;
         Port = port;
+        _localStateRevision = 0;
         _client = new NetworkClient(hostAddress, port);
-        _client.ConnectAsync(callsign).GetAwaiter().GetResult();
+        _client.ConnectAsync(callsign, _clientSessionId).GetAwaiter().GetResult();
         Mode = NetMode.Client;
         MapSeed = _client.MapSeed;
         LocalPlayerId = _client.AssignedPlayerId >= 0 ? _client.AssignedPlayerId : 1;
@@ -96,6 +100,7 @@ public sealed class NetworkManager : IDisposable
         Mode = NetMode.None;
         LocalPlayerId = 0;
         MapSeed = 0;
+        _localStateRevision = 0;
         _lanDiscovery.StopHosting();
         try { _server?.Dispose(); } catch { }
         try { _client?.Dispose(); } catch { }
@@ -111,13 +116,27 @@ public sealed class NetworkManager : IDisposable
         int health,
         bool isAlive,
         int armor = 0,
+        int maxHealth = 100,
         string weaponName = "Pistol",
         int weaponLevel = 1,
         int weaponSlot = 0,
         int selectedHotbarRawIndex = 0,
+        int currentWeaponAmmoInClip = 0,
+        int currentWeaponAmmoReserve = 0,
+        int credits = 0,
+        int scrap = 0,
+        int barricadeKits = 0,
+        int kills = 0,
+        int turretCharges = 0,
+        int maxTurretCharges = 1,
+        float adrenaline = 0f,
+        float maxAdrenaline = 100f,
         Vector2 moveInput = default,
         float moveBlend = 0f,
+        float fireTimer = 0f,
+        int weaponStateSequence = 0,
         bool isReloading = false,
+        float reloadTimer = 0f,
         bool isOverdriveActive = false,
         float shootAnimation = 0f,
         float pickupAnimation = 0f,
@@ -138,6 +157,7 @@ public sealed class NetworkManager : IDisposable
             Y = position.Y,
             AimAngle = aimAngle,
             Health = health,
+            MaxHealth = maxHealth,
             Armor = armor,
             IsAlive = isAlive,
             AccentArgb = accent.ToArgb(),
@@ -145,10 +165,24 @@ public sealed class NetworkManager : IDisposable
             WeaponLevel = weaponLevel,
             WeaponSlot = weaponSlot,
             SelectedHotbarRawIndex = selectedHotbarRawIndex,
+            CurrentWeaponAmmoInClip = currentWeaponAmmoInClip,
+            CurrentWeaponAmmoReserve = currentWeaponAmmoReserve,
+            Credits = credits,
+            Scrap = scrap,
+            BarricadeKits = barricadeKits,
+            Kills = kills,
+            TurretCharges = turretCharges,
+            MaxTurretCharges = maxTurretCharges,
+            Adrenaline = adrenaline,
+            MaxAdrenaline = maxAdrenaline,
             MoveX = moveInput.X,
             MoveY = moveInput.Y,
             MoveBlend = moveBlend,
+            ClientStateRevision = ++_localStateRevision,
+            WeaponStateSequence = weaponStateSequence,
+            FireTimer = fireTimer,
             IsReloading = isReloading,
+            ReloadTimer = reloadTimer,
             IsOverdriveActive = isOverdriveActive,
             ShootAnimation = shootAnimation,
             PickupAnimation = pickupAnimation,
@@ -261,6 +295,16 @@ public sealed class NetworkManager : IDisposable
     public bool ApplyRemotePlayerPickup(int playerId, PickupType type, int value)
     {
         return Mode == NetMode.Host && _server is not null && _server.TryApplyPickupToPlayer(playerId, type, value);
+    }
+
+    public bool ApplyRemotePlayerScrap(int playerId, int value)
+    {
+        return Mode == NetMode.Host && _server is not null && _server.TryApplyScrapToPlayer(playerId, value);
+    }
+
+    public bool AwardRemotePlayerKill(int playerId, int reward)
+    {
+        return Mode == NetMode.Host && _server is not null && _server.TryAwardKillToPlayer(playerId, reward);
     }
 
     private static RemotePlayerView ToView(NetPlayerState state)

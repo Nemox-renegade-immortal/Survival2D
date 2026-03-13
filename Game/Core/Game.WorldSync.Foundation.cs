@@ -130,7 +130,7 @@ public sealed partial class Game
             Grenade grenade = _grenades[i];
             state.Grenades.Add(new NetGrenadeState
             {
-                Id = i,
+                Id = grenade.NetworkId > 0 ? grenade.NetworkId : i + 1,
                 X = grenade.Position.X,
                 Y = grenade.Position.Y,
                 VelocityX = grenade.Velocity.X,
@@ -149,7 +149,7 @@ public sealed partial class Game
             Explosion explosion = _explosions[i];
             state.Explosions.Add(new NetExplosionState
             {
-                Id = i,
+                Id = explosion.NetworkId > 0 ? explosion.NetworkId : i + 1,
                 X = explosion.Position.X,
                 Y = explosion.Position.Y,
                 Radius = explosion.Radius,
@@ -166,6 +166,24 @@ public sealed partial class Game
                 Tx = tx,
                 Ty = ty,
                 Health = health
+            });
+        }
+
+        for (int i = 0; i < _networkFxEvents.Count; i++)
+        {
+            NetworkFxEvent fx = _networkFxEvents[i];
+            state.FxEvents.Add(new NetFxEventState
+            {
+                Id = fx.Id,
+                TypeId = (int)fx.Type,
+                X = fx.Position.X,
+                Y = fx.Position.Y,
+                VelocityX = fx.Velocity.X,
+                VelocityY = fx.Velocity.Y,
+                Radius = fx.Radius,
+                TintArgb = fx.Tint.ToArgb(),
+                Value = fx.Value,
+                Flag = fx.Flag
             });
         }
 
