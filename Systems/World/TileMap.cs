@@ -35,8 +35,9 @@ public sealed class TileMap
     public int Height => _tiles.GetLength(1);
     public int PixelWidth => Width * TileSize;
     public int PixelHeight => Height * TileSize;
+    public bool IsGenerated { get; private set; }
 
-    public TileMap(int width, int height, Random rng)
+    public TileMap(int width, int height, Random rng, bool buildNow = true)
     {
         _tiles = new int[width, height];
         _floor = new int[width, height];
@@ -44,7 +45,11 @@ public sealed class TileMap
         _pathMarks = new int[width, height];
         _pathParentX = new int[width, height];
         _pathParentY = new int[width, height];
-        Rebuild(rng);
+        IsGenerated = false;
+        if (buildNow)
+        {
+            Rebuild(rng);
+        }
     }
 
     private void BeginPathSearch()
@@ -59,6 +64,7 @@ public sealed class TileMap
 
     public void Rebuild(Random rng)
     {
+        IsGenerated = true;
         _doors.Clear();
 
         for (int x = 0; x < Width; x++)

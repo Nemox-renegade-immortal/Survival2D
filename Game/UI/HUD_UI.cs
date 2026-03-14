@@ -109,42 +109,48 @@ public sealed partial class Game
         ImDrawListPtr bg = ImGui.GetBackgroundDrawList();
         ImDrawListPtr fg = ImGui.GetForegroundDrawList();
 
-        DrawImGuiWorld(bg, screen);
-        DrawImGuiDayNightOverlay(bg, screen);
-        DrawImGuiWorldGlow(bg, screen);
-        DrawImGuiAtmosphereShader(bg, screen);
-
         bool gameplayOverlay = _phase == GamePhase.Playing || _phase == GamePhase.Paused || _phase == GamePhase.GameOver;
         if (gameplayOverlay)
         {
+            DrawImGuiWorld(bg, screen);
+            DrawImGuiDayNightOverlay(bg, screen);
+            DrawImGuiWorldGlow(bg, screen);
+            if (_screenShaderEnabled)
+            {
+                DrawImGuiAtmosphereShader(bg, screen);
+            }
             DrawImGuiCrosshair(fg);
+        }
+        else
+        {
+            DrawImGuiMenuBackdrop(bg, screen);
         }
 
         switch (_phase)
         {
+            case GamePhase.Splash:
+                DrawImGuiSplashScreen(fg, screen);
+                break;
             case GamePhase.Title:
-                DrawImGuiTint(fg, screen, 124);
                 DrawImGuiTitle(fg, screen);
                 break;
             case GamePhase.Settings:
-                DrawImGuiTint(fg, screen, 146);
                 DrawImGuiSettings(fg, screen);
                 break;
             case GamePhase.MultiplayerMenu:
-                DrawImGuiTint(fg, screen, 146);
                 DrawImGuiMultiplayerMenu(fg, screen);
                 break;
             case GamePhase.LanBrowser:
-                DrawImGuiTint(fg, screen, 146);
                 DrawImGuiLanBrowser(fg, screen);
                 break;
             case GamePhase.HostSetup:
-                DrawImGuiTint(fg, screen, 146);
                 DrawImGuiHostSetup(fg, screen);
                 break;
             case GamePhase.JoinSetup:
-                DrawImGuiTint(fg, screen, 146);
                 DrawImGuiJoinSetup(fg, screen);
+                break;
+            case GamePhase.Loading:
+                DrawImGuiLoadingScreen(fg, screen);
                 break;
             case GamePhase.Playing:
                 DrawImGuiHud(fg, screen);
@@ -903,7 +909,7 @@ public sealed partial class Game
 
     private void DrawImGuiTitle(ImDrawListPtr draw, Vector2 screen)
     {
-        BeginModalWindow("Main Menu", screen, 520f, 420f);
+        BeginModalWindow("Main Menu", screen, 520f, 460f);
         ImGui.Text("Survival 2D Alpha");
         ImGui.Separator();
         ImGui.TextWrapped("Testing create game...");
@@ -913,6 +919,7 @@ public sealed partial class Game
         if (ImGui.Button("Multiplayer", new Vector2(-1f, 0f))) ActivateTitleButton("multi");
         if (ImGui.Button("Settings", new Vector2(-1f, 0f))) ActivateTitleButton("settings");
         if (ImGui.Button(_shuffleArenaOnStart ? "Arena shuffle: ON" : "Arena shuffle: OFF", new Vector2(-1f, 0f))) ActivateTitleButton("shuffle");
+        if (ImGui.Button("Exit", new Vector2(-1f, 0f))) ActivateTitleButton("exit");
 
         ImGui.Spacing();
         ImGui.Separator();
@@ -979,35 +986,224 @@ public sealed partial class Game
 
     private void DrawImGuiSettings(ImDrawListPtr draw, Vector2 screen)
     {
-        BeginModalWindow("Settings", screen, 540f, 470f);
-        ImGui.Text("Game settings");
+        BeginModalWindow("Settings", screen, 780f, 470f);
+
+        float navWidth = 220f;
+        ImGui.BeginChild("settings_tabs", new Vector2(navWidth, 0f), ImGuiChildFlags.Borders);
+        ImGui.Text("Tabs");
         ImGui.Separator();
 
+        foreach (SettingsTab tab in SettingsTabOrder)
+        {
+            bool selected = _settingsTab == tab;
+            if (selected)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Button, ToVec4(Color.FromArgb(88, 104, 132)));
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ToVec4(Color.FromArgb(98, 118, 148)));
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ToVec4(Color.FromArgb(108, 130, 162)));
+            }
+
+            string label = GetSettingsTabName(tab);
+            if (ImGui.Button(label, new Vector2(-1f, 42f)))
+            {
+                ActivateSettingsButton($"tab:{GetSettingsTabToken(tab)}");
+            }
+
+            if (selected)
+            {
+                ImGui.PopStyleColor(3);
+            }
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        if (ImGui.Button("Back", new Vector2(-1f, 0f))) ActivateSettingsButton("back");
+        ImGui.EndChild();
+
+        ImGui.SameLine();
+
+        ImGui.BeginChild("settings_main", new Vector2(0f, 0f), ImGuiChildFlags.Borders);
+        switch (_settingsTab)
+        {
+            case SettingsTab.Gameplay:
+                DrawImGuiGameplaySettingsTab();
+                break;
+            case SettingsTab.Interface:
+                DrawImGuiInterfaceSettingsTab();
+                break;
+            case SettingsTab.Graphic:
+                DrawImGuiGraphicSettingsTab();
+                break;
+            case SettingsTab.Audio:
+                DrawImGuiAudioSettingsTab();
+                break;
+            case SettingsTab.Network:
+                DrawImGuiNetworkSettingsTab();
+                break;
+        }
+
+        ImGui.EndChild();
+        ImGui.End();
+    }
+
+    private void DrawImGuiGameplaySettingsTab()
+    {
+        ImGui.Text(GetSettingsPanelTitle());
+        ImGui.TextDisabled("Type your nickname directly, then press Enter or click outside the field.");
+        ImGui.Separator();
+
+        ImGui.TextDisabled("Nickname");
+        ImGui.SetNextItemWidth(-1f);
+        bool submitted = ImGui.InputText("##settings_nickname", ref _nicknameInputBuffer, 24, ImGuiInputTextFlags.EnterReturnsTrue);
+        CommitImGuiTextIfNeeded(submitted, () => CommitNicknameInput());
+
+        if (ImGui.Button("Reset nickname", new Vector2(-1f, 0f))) ActivateSettingsButton("nicknamereset");
         if (ImGui.Button($"Difficulty: {GetDifficultyName()}", new Vector2(-1f, 0f))) ActivateSettingsButton("difficulty");
-        if (ImGui.Button($"HUD scale: {GetUiScaleName()}", new Vector2(-1f, 0f))) ActivateSettingsButton("uiscale");
         if (ImGui.Button(_showHints ? "Hints: ON" : "Hints: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("hints");
-        if (ImGui.Button(_sound.Enabled ? "Audio: ON" : "Audio: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("audio");
-        if (ImGui.Button(_showNetworkDebug ? "Net debug: ON" : "Net debug: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("netdebug");
+        if (ImGui.Button(_shuffleArenaOnStart ? "Arena shuffle: ON" : "Arena shuffle: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("shuffle");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled($"Nickname: {_preferredCallsign}");
+        ImGui.TextDisabled($"Current difficulty: {GetDifficultyName()}");
+        ImGui.TextDisabled(_shuffleArenaOnStart ? "Arena reshuffles when a new run starts." : "Arena seed stays sticky until you toggle shuffle back on.");
+        ImGui.TextDisabled("Nickname saves into Assets/Settings/game_settings.json.");
+    }
+
+    private void DrawImGuiInterfaceSettingsTab()
+    {
+        ImGui.Text(GetSettingsPanelTitle());
+        ImGui.TextDisabled(GetSettingsPanelSubtitle());
+        ImGui.Separator();
+
+        if (ImGui.Button($"HUD scale: {GetUiScaleName()}", new Vector2(-1f, 0f))) ActivateSettingsButton("uiscale");
         if (ImGui.Button(_showFpsHud ? "FPS HUD: ON" : "FPS HUD: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("fpshud");
         if (ImGui.Button(_showPerfHud ? "Perf HUD: ON" : "Perf HUD: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("perfhud");
-        if (ImGui.Button("Back", new Vector2(-1f, 0f))) ActivateSettingsButton("back");
 
-        ImGui.End();
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled($"HUD scale preset: {GetUiScaleName()}");
+        ImGui.TextDisabled("HUD now auto-shrinks with smaller window sizes and respects your preset on top.");
+        ImGui.TextDisabled(_showPerfHud ? "Perf HUD also forces FPS HUD on so the numbers stay honest." : "Enable overlays here when you want raw numbers.");
+    }
+
+    private void DrawImGuiGraphicSettingsTab()
+    {
+        ImGui.Text(GetSettingsPanelTitle());
+        ImGui.TextDisabled(GetSettingsPanelSubtitle());
+        ImGui.Separator();
+
+        if (ImGui.Button(_menuArtworkEnabled ? "Menu backdrop: ARTWORK" : "Menu backdrop: BLACK", new Vector2(-1f, 0f))) ActivateSettingsButton("menuart");
+        if (ImGui.Button(_splashLogoEnabled ? "Splash logo: ON" : "Splash logo: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("splashlogo");
+        if (ImGui.Button(_screenShaderEnabled ? "Screen shader: ON" : "Screen shader: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("shader");
+        if (ImGui.Button(_worldParticlesEnabled ? "World particles: ON" : "World particles: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("particles");
+        if (ImGui.Button(_screenShakeEnabled ? "Screen shake: ON" : "Screen shake: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("screenshake");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled(_menuArtworkEnabled ? "Menu artwork is enabled when a background file exists." : "Menu background is forced to pure black.");
+        ImGui.TextDisabled(_splashLogoEnabled ? "Splash logo will render when a logo asset exists." : "Splash logo is hidden even if an asset exists.");
+        ImGui.TextDisabled(_screenShaderEnabled ? "Atmosphere shader and vignette are enabled." : "Extra screen shader is disabled.");
+        ImGui.TextDisabled(_worldParticlesEnabled ? "Impact particles are visible." : "World particles are hidden for a cleaner frame.");
+        ImGui.TextDisabled(_screenShakeEnabled ? "Screen shake is active." : "Screen shake is disabled.");
+        ImGui.TextDisabled($"Renderer: {_rendererLabel}");
+    }
+
+    private void DrawImGuiAudioSettingsTab()
+    {
+        ImGui.Text(GetSettingsPanelTitle());
+        ImGui.TextDisabled("Volume is now slider-based, not that old caveman click-click bullshit.");
+        ImGui.Separator();
+
+        bool audioEnabled = _sound.Enabled;
+        if (ImGui.Checkbox("Audio enabled", ref audioEnabled))
+        {
+            _sound.Enabled = audioEnabled;
+            _sound.PlayUi(UiSound.Click);
+            SavePersistentSettings();
+            SetAnnouncement(_sound.Enabled ? "Audio enabled" : "Audio disabled", 1f);
+        }
+
+        ImGui.BeginDisabled(!_sound.Enabled);
+
+        int master = _sound.MasterVolumePercent;
+        if (ImGui.SliderInt("Master volume", ref master, 0, 100, "%d%%"))
+        {
+            SetMasterVolumePercent(master);
+            SavePersistentSettings();
+        }
+
+        int ui = _sound.UiVolumePercent;
+        if (ImGui.SliderInt("UI volume", ref ui, 0, 100, "%d%%"))
+        {
+            SetUiVolumePercent(ui);
+            SavePersistentSettings();
+        }
+
+        int world = _sound.WorldVolumePercent;
+        if (ImGui.SliderInt("World volume", ref world, 0, 100, "%d%%"))
+        {
+            SetWorldVolumePercent(world);
+            SavePersistentSettings();
+        }
+
+        ImGui.EndDisabled();
+
+        bool spatial = _sound.SpatialAudioEnabled;
+        if (ImGui.Checkbox("3D audio", ref spatial))
+        {
+            _sound.SpatialAudioEnabled = spatial;
+            _sound.PlayUi(UiSound.Click);
+            SavePersistentSettings();
+            SetAnnouncement(_sound.SpatialAudioEnabled ? "3D audio enabled" : "3D audio disabled", 1f);
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled(_sound.Enabled ? "Sound and UI click audio are live." : "Everything is muted from the menu level.");
+        ImGui.TextDisabled($"Master {_sound.MasterVolumePercent}% · UI {_sound.UiVolumePercent}% · World {_sound.WorldVolumePercent}%");
+        ImGui.TextDisabled(_sound.SpatialAudioEnabled ? "3D panning is enabled." : "All audio is forced to 2D center mix.");
+    }
+
+    private void DrawImGuiNetworkSettingsTab()
+    {
+        ImGui.Text(GetSettingsPanelTitle());
+        ImGui.TextDisabled(GetSettingsPanelSubtitle());
+        ImGui.Separator();
+
+        if (ImGui.Button($"Join target: {_joinAddress}:{_joinPort} · Paste clipboard", new Vector2(-1f, 0f))) ActivateSettingsButton("joinpaste");
+        if (ImGui.Button("Join target: reset localhost", new Vector2(-1f, 0f))) ActivateSettingsButton("joinreset");
+        if (ImGui.Button(_showNetworkDebug ? "Net debug: ON" : "Net debug: OFF", new Vector2(-1f, 0f))) ActivateSettingsButton("netdebug");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled(_showNetworkDebug ? "Packet and snapshot stats are visible in HUD." : "HUD stays clean until debug is enabled.");
+        ImGui.TextDisabled($"Stored join: {_joinAddress}:{_joinPort} · slots {_maxPlayers}");
+        ImGui.TextDisabled(_network.StatusText);
     }
 
     private void DrawImGuiHostSetup(ImDrawListPtr draw, Vector2 screen)
     {
-        BeginModalWindow("Host Setup", screen, 540f, 360f);
+        BeginModalWindow("Host Setup", screen, 540f, 330f);
         ImGui.Text("Host session");
         ImGui.Separator();
-        ImGui.Text($"Port: {_joinPort}");
-        ImGui.Text($"Slots: {_maxPlayers}");
+        ImGui.TextDisabled("Type the values directly. Press Enter or click outside the field to apply.");
         ImGui.Spacing();
 
-        if (ImGui.Button($"Port -   {_joinPort}", new Vector2(-1f, 0f))) ActivateHostButton("portminus");
-        if (ImGui.Button($"Port +   {_joinPort}", new Vector2(-1f, 0f))) ActivateHostButton("portplus");
-        if (ImGui.Button($"Slots -  {_maxPlayers}", new Vector2(-1f, 0f))) ActivateHostButton("maxminus");
-        if (ImGui.Button($"Slots +  {_maxPlayers}", new Vector2(-1f, 0f))) ActivateHostButton("maxplus");
+        ImGui.TextDisabled("Port");
+        ImGui.SetNextItemWidth(-1f);
+        bool portSubmitted = ImGui.InputText("##host_port", ref _hostPortInputBuffer, 6, ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
+        CommitImGuiTextIfNeeded(portSubmitted, () => CommitHostPortInput());
+
+        ImGui.TextDisabled("Slots");
+        ImGui.SetNextItemWidth(-1f);
+        bool slotsSubmitted = ImGui.InputText("##host_slots", ref _hostSlotsInputBuffer, 3, ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
+        CommitImGuiTextIfNeeded(slotsSubmitted, () => CommitHostSlotsInput());
+
+        ImGui.Spacing();
+        ImGui.TextDisabled($"Active host setup: tcp/{_joinPort} · slots {_maxPlayers}");
+        ImGui.Spacing();
+
         if (ImGui.Button("Start host match", new Vector2(-1f, 0f))) ActivateHostButton("hoststart");
         if (ImGui.Button("Back", new Vector2(-1f, 0f))) ActivateHostButton("back");
 
@@ -1016,16 +1212,27 @@ public sealed partial class Game
 
     private void DrawImGuiJoinSetup(ImDrawListPtr draw, Vector2 screen)
     {
-        BeginModalWindow("Join Setup", screen, 560f, 380f);
+        BeginModalWindow("Join Setup", screen, 560f, 360f);
         ImGui.Text("Join session");
         ImGui.Separator();
-        ImGui.TextWrapped($"Target: {_joinAddress}:{_joinPort}");
+        ImGui.TextDisabled("Type the server address and port directly. Press Enter or click outside the field to apply.");
         ImGui.Spacing();
 
-        if (ImGui.Button($"Paste address ({_joinAddress})", new Vector2(-1f, 0f))) ActivateJoinButton("paste");
+        ImGui.TextDisabled("Address");
+        ImGui.SetNextItemWidth(-1f);
+        bool addressSubmitted = ImGui.InputText("##join_address", ref _joinAddressInputBuffer, 96, ImGuiInputTextFlags.EnterReturnsTrue);
+        CommitImGuiTextIfNeeded(addressSubmitted, () => CommitJoinAddressInput());
+
+        ImGui.TextDisabled("Port");
+        ImGui.SetNextItemWidth(-1f);
+        bool portSubmitted = ImGui.InputText("##join_port", ref _joinPortInputBuffer, 6, ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
+        CommitImGuiTextIfNeeded(portSubmitted, () => CommitJoinPortInput());
+
+        ImGui.Spacing();
+        ImGui.TextDisabled($"Target: {_joinAddress}:{_joinPort}");
+        ImGui.Spacing();
+
         if (ImGui.Button("Use localhost", new Vector2(-1f, 0f))) ActivateJoinButton("localhost");
-        if (ImGui.Button($"Port -   {_joinPort}", new Vector2(-1f, 0f))) ActivateJoinButton("portminus");
-        if (ImGui.Button($"Port +   {_joinPort}", new Vector2(-1f, 0f))) ActivateJoinButton("portplus");
         if (ImGui.Button("Connect and start", new Vector2(-1f, 0f))) ActivateJoinButton("joinstart");
         if (ImGui.Button("Back", new Vector2(-1f, 0f))) ActivateJoinButton("back");
 
@@ -1034,12 +1241,15 @@ public sealed partial class Game
 
     private void DrawImGuiPause(ImDrawListPtr draw, Vector2 screen)
     {
-        BeginModalWindow("Paused", screen, 400f, 240f);
+
+        BeginModalWindow("Paused", screen, 420f, 300f);
         ImGui.Text("Game paused");
+        ImGui.TextDisabled(GetPauseMenuSubtitle());
         ImGui.Separator();
         if (ImGui.Button("Resume", new Vector2(-1f, 0f))) ActivatePausedButton("resume");
         if (ImGui.Button("Settings", new Vector2(-1f, 0f))) ActivatePausedButton("settings");
-        if (ImGui.Button("Return to title", new Vector2(-1f, 0f))) ActivatePausedButton("title");
+        if (ImGui.Button(GetPauseSessionActionLabel(), new Vector2(-1f, 0f))) ActivatePausedButton(GetPauseSessionActionId());
+        if (ImGui.Button("Exit", new Vector2(-1f, 0f))) ActivatePausedButton("exit");
         ImGui.End();
     }
 
@@ -1058,10 +1268,14 @@ public sealed partial class Game
 
     private void DrawImGuiAnnouncement(ImDrawListPtr draw, Vector2 screen)
     {
-        ImGui.SetNextWindowPos(new Vector2((screen.X - 420f) * 0.5f, 16f), ImGuiCond.Always);
-        ImGui.SetNextWindowSize(new Vector2(420f, 58f), ImGuiCond.Always);
+        float s = GetAdaptiveImGuiHudScale(screen);
+        float width = Math.Clamp(420f * s, 300f, screen.X - 32f);
+        float height = 58f * s;
+        ImGui.SetNextWindowPos(new Vector2((screen.X - width) * 0.5f, 16f * s), ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(width, height), ImGuiCond.Always);
         ImGui.SetNextWindowBgAlpha(0.92f);
         ImGui.Begin("##announcement", ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings);
+        ImGui.SetWindowFontScale(Math.Clamp(0.9f * s, 0.82f, 1.10f));
         ImGui.TextColored(ToVec4(Player.Accent), "NOTICE");
         ImGui.SameLine();
         ImGui.TextWrapped(_announcement);
@@ -1072,10 +1286,16 @@ public sealed partial class Game
     {
         Player player = Player;
         List<InventoryViewSlot> inventorySlots = BuildInventorySlots(player);
-        float leftW = 292f;
-        float rightW = 292f;
+        float s = GetAdaptiveImGuiHudScale(screen);
+        float margin = 14f * s;
+        float panelGap = 10f * s;
+        float leftW = 292f * s;
+        float rightW = 292f * s;
+        float phaseW = Math.Clamp(340f * s, 250f, screen.X - 32f);
+        float hotbarHeight = 134f * s;
+        float chatReserved = GetChatReservedHeight(screen, s);
 
-        BeginOverlayWindow("##phase_panel", new Vector2((screen.X - 340f) * 0.5f, 14f), new Vector2(340f, 60f), 0.88f);
+        BeginOverlayWindow("##phase_panel", new Vector2((screen.X - phaseW) * 0.5f, margin), new Vector2(phaseW, 60f * s), 0.88f, s);
         ImGui.TextColored(ToVec4(_dayNight.IsNight ? Color.FromArgb(255, 194, 118) : Color.FromArgb(104, 220, 255)), _dayNight.IsNight ? $"Night wave {_waveNumber}" : "Day phase");
         ImGui.SameLine();
         ImGui.TextDisabled(FormatPhaseTimer(_dayNight.RemainingTime));
@@ -1085,7 +1305,7 @@ public sealed partial class Game
         ImGui.TextDisabled($"Players {_network.ConnectedPlayers}");
         ImGui.End();
 
-        BeginOverlayWindow("##status_panel", new Vector2(14f, 14f), new Vector2(leftW, 166f), 0.88f);
+        BeginOverlayWindow("##status_panel", new Vector2(margin, margin), new Vector2(leftW, 166f * s), 0.88f, s);
         ImGui.TextColored(ToVec4(player.Accent), player.Callsign);
         ImGui.SameLine();
         ImGui.TextDisabled($"Score {_score}");
@@ -1098,7 +1318,7 @@ public sealed partial class Game
         ImGui.Text($"Kills {player.Kills}   Crates {_lootCrates.Count}");
         ImGui.End();
 
-        BeginOverlayWindow("##weapon_panel", new Vector2(screen.X - rightW - 14f, 14f), new Vector2(rightW, 178f), 0.88f);
+        BeginOverlayWindow("##weapon_panel", new Vector2(screen.X - rightW - margin, margin), new Vector2(rightW, 178f * s), 0.88f, s);
         int selectedRawIndex = GetSelectedHotbarRawIndex();
         if (selectedRawIndex >= 0 && selectedRawIndex < Player.ActiveWeaponSlots && player.SelectedWeaponIndex == selectedRawIndex)
         {
@@ -1142,16 +1362,16 @@ public sealed partial class Game
         }
         ImGui.End();
 
-        float slotWidth = Math.Clamp((screen.X - 220f) / 9f - 8f, 80f, 96f);
-        float hotbarHeight = 134f;
-        float hotbarWidth = slotWidth * 9f + 8f * 8f + 22f;
-        BeginOverlayWindow("##hotbar_panel", new Vector2((screen.X - hotbarWidth) * 0.5f, screen.Y - hotbarHeight - 14f), new Vector2(hotbarWidth, hotbarHeight), 0.94f);
+        float slotGap = 8f * s;
+        float slotWidth = Math.Clamp((screen.X - 220f * s) / 9f - slotGap, 64f * s, 96f * s);
+        float hotbarWidth = slotWidth * 9f + slotGap * 8f + 22f * s;
+        BeginOverlayWindow("##hotbar_panel", new Vector2((screen.X - hotbarWidth) * 0.5f, screen.Y - hotbarHeight - margin), new Vector2(hotbarWidth, hotbarHeight), 0.94f, s);
         ImGui.TextDisabled("Hotbar");
         ImGui.SameLine();
         ImGui.TextColored(ToVec4(GetHotbarSlotAccent(player, selectedRawIndex)), $"Slot {GetSelectedHotbarDisplayIndex() + 1}");
         ImGui.SameLine();
         ImGui.TextDisabled("1-9 · wheel · click");
-        ImGui.Dummy(new Vector2(0f, 4f));
+        ImGui.Dummy(new Vector2(0f, 4f * s));
         for (int displayIndex = 0; displayIndex < 9; displayIndex++)
         {
             if (displayIndex > 0)
@@ -1162,13 +1382,13 @@ public sealed partial class Game
             int rawIndex = _inventoryLayout[displayIndex];
             InventoryViewSlot slot = inventorySlots[Math.Clamp(rawIndex, 0, inventorySlots.Count - 1)];
             bool active = displayIndex == GetSelectedHotbarDisplayIndex();
-            if (DrawHotbarTile($"hud_hotbar_{displayIndex}", slot, new Vector2(slotWidth, 78f), displayIndex, active))
+            if (DrawHotbarTile($"hud_hotbar_{displayIndex}", slot, new Vector2(slotWidth, 78f * s), displayIndex, active))
             {
                 ActivateHotbarSlot(player, displayIndex, new Size((int)screen.X, (int)screen.Y));
             }
         }
 
-        ImGui.Dummy(new Vector2(0f, 10f));
+        ImGui.Dummy(new Vector2(0f, 10f * s));
         ImGui.PushTextWrapPos(0f);
         ImGui.TextColored(ToVec4(GetHotbarSlotAccent(player, selectedRawIndex)), GetHotbarSlotTitle(player, selectedRawIndex));
         ImGui.SameLine();
@@ -1180,8 +1400,9 @@ public sealed partial class Game
 
         if (_remotePlayers.Count > 0)
         {
-            float remoteHeight = Math.Min(186f, 42f + _remotePlayers.Count * 34f);
-            BeginOverlayWindow("##squad_panel", new Vector2(14f, screen.Y - remoteHeight - 160f), new Vector2(280f, remoteHeight), 0.84f);
+            float remoteHeight = Math.Min(186f * s, 42f * s + _remotePlayers.Count * 34f * s);
+            float squadBottom = screen.Y - hotbarHeight - margin - chatReserved - panelGap;
+            BeginOverlayWindow("##squad_panel", new Vector2(margin, squadBottom - remoteHeight), new Vector2(280f * s, remoteHeight), 0.84f, s);
             ImGui.Text("Squad");
             ImGui.Separator();
             foreach (RemotePlayerView remote in _remotePlayers)
@@ -1196,13 +1417,18 @@ public sealed partial class Game
         if (_showFpsHud || _showPerfHud)
         {
             float[] graph = BuildFrameGraphOrdered();
-            BeginOverlayWindow("##perf_panel", new Vector2(screen.X - 282f, screen.Y - 220f), new Vector2(268f, 188f), 0.82f);
+            float perfHeight = 188f * s;
+            float perfWidth = 268f * s;
+            float perfBottom = screen.Y - hotbarHeight - margin - panelGap;
+            BeginOverlayWindow("##perf_panel", new Vector2(screen.X - perfWidth - margin, perfBottom - perfHeight), new Vector2(perfWidth, perfHeight), 0.82f, s);
             ImGui.Text($"FPS {_renderFps:0}  UPS {_updateFps:0}");
             ImGui.TextDisabled(_rendererLabel);
             ImGui.Text($"Update {_updateMs:0.00} ms  Render {_renderMs:0.00} ms");
-            ImGui.PlotLines("##framems", ref graph[0], graph.Length, 0, null, 0f, 40f, new Vector2(0f, 82f));
+            ImGui.PlotLines("##framems", ref graph[0], graph.Length, 0, null, 0f, 40f, new Vector2(0f, 82f * s));
             ImGui.End();
         }
+
+        DrawImGuiChatOverlay(screen, s, _phase == GamePhase.Playing || _phase == GamePhase.Paused);
 
         if (_inventoryOpen)
         {
@@ -2324,17 +2550,93 @@ public sealed partial class Game
 
     private void BeginModalWindow(string title, Vector2 screen, float width, float height)
     {
+        BeginModalWindow(title, screen, width, height, 1f);
+    }
+
+    private void BeginModalWindow(string title, Vector2 screen, float width, float height, float uiScale)
+    {
         ImGui.SetNextWindowPos(new Vector2((screen.X - width) * 0.5f, (screen.Y - height) * 0.5f), ImGuiCond.Always);
         ImGui.SetNextWindowSize(new Vector2(width, height), ImGuiCond.Always);
         ImGui.Begin(title, ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings);
+        ImGui.SetWindowFontScale(Math.Clamp(0.92f * uiScale, 0.82f, 1.16f));
     }
 
     private void BeginOverlayWindow(string id, Vector2 pos, Vector2 size, float alpha)
+    {
+        BeginOverlayWindow(id, pos, size, alpha, 1f);
+    }
+
+    private void BeginOverlayWindow(string id, Vector2 pos, Vector2 size, float alpha, float uiScale)
     {
         ImGui.SetNextWindowPos(pos, ImGuiCond.Always);
         ImGui.SetNextWindowSize(size, ImGuiCond.Always);
         ImGui.SetNextWindowBgAlpha(alpha);
         ImGui.Begin(id, ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoBringToFrontOnFocus);
+        ImGui.SetWindowFontScale(Math.Clamp(0.92f * uiScale, 0.80f, 1.16f));
+    }
+
+    private void DrawImGuiChatOverlay(Vector2 screen, float hudScale, bool allowInput)
+    {
+        RectangleF rect = GetChatPanelRect(screen, hudScale);
+        BeginOverlayWindow("##chat_panel", new Vector2(rect.X, rect.Y), new Vector2(rect.Width, rect.Height), 0.86f, hudScale);
+        ImGui.TextColored(ToVec4(Color.FromArgb(124, 196, 255)), "Chat");
+        ImGui.SameLine();
+        ImGui.TextDisabled(allowInput ? (_chatOpen ? "Enter = send · Esc = close" : "Enter or click the field") : "Read only right now");
+
+        float footerReserve = allowInput ? 34f * hudScale : 0f;
+        float historyHeight = Math.Max(48f * hudScale, rect.Height - 46f * hudScale - footerReserve);
+        ImGui.BeginChild("##chat_log", new Vector2(0f, historyHeight), ImGuiChildFlags.Borders);
+        if (_chatEntries.Count == 0)
+        {
+            ImGui.TextDisabled("No messages yet.");
+        }
+        else
+        {
+            for (int i = 0; i < _chatEntries.Count; i++)
+            {
+                ChatEntry entry = _chatEntries[i];
+                ImGui.PushTextWrapPos(0f);
+                if (entry.IsSystem)
+                {
+                    ImGui.TextColored(ToVec4(Color.FromArgb(186, 214, 226, 238)), $"> {entry.Message}");
+                }
+                else
+                {
+                    ImGui.TextColored(ToVec4(entry.Accent), entry.Sender + ":");
+                    ImGui.SameLine(0f, 4f);
+                    ImGui.TextWrapped(entry.Message);
+                }
+                ImGui.PopTextWrapPos();
+            }
+
+            if (_chatScrollToBottom)
+            {
+                ImGui.SetScrollHereY(1f);
+                _chatScrollToBottom = false;
+            }
+        }
+        ImGui.EndChild();
+
+        if (allowInput)
+        {
+            ImGui.TextDisabled(_chatOpen ? "Type and hit Enter." : "Click here or press Enter to write.");
+            if (_chatFocusInputRequested)
+            {
+                ImGui.SetKeyboardFocusHere();
+                _chatFocusInputRequested = false;
+            }
+
+            ImGui.SetNextItemWidth(-1f);
+            bool submitted = ImGui.InputText("##chat_input", ref _chatInputBuffer, MaxChatMessageLength, ImGuiInputTextFlags.EnterReturnsTrue);
+            bool itemActive = ImGui.IsItemActive() || ImGui.IsItemFocused();
+            _chatOpen = submitted ? false : (itemActive || !string.IsNullOrWhiteSpace(_chatInputBuffer));
+            if (submitted)
+            {
+                SubmitChatMessage();
+            }
+        }
+
+        ImGui.End();
     }
 
     private float[] BuildFrameGraphOrdered()

@@ -230,6 +230,42 @@ public sealed class NetworkManager : IDisposable
         };
     }
 
+
+    public IReadOnlyList<NetChatMessage> DrainIncomingChatMessages()
+    {
+        return Mode switch
+        {
+            NetMode.Host when _server is not null => _server.DequeueHostChatMessages(),
+            NetMode.Client when _client is not null => _client.DequeueChatMessages(),
+            _ => Array.Empty<NetChatMessage>()
+        };
+    }
+
+    public void SendChatMessage(string callsign, Color accent, string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        if (Mode == NetMode.Host)
+        {
+            _server?.BroadcastHostChat(callsign, accent.ToArgb(), message);
+        }
+        else if (Mode == NetMode.Client)
+        {
+            _client?.SendChat(new NetChatMessage
+            {
+                SenderPlayerId = LocalPlayerId,
+                Sender = callsign,
+                Message = message,
+                AccentArgb = accent.ToArgb(),
+                ServerUtcTicks = DateTime.UtcNow.Ticks,
+                IsSystem = false
+            });
+        }
+    }
+
     public IReadOnlyList<LanServerInfo> GetLanServers()
     {
         return _lanDiscovery.GetServers();

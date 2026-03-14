@@ -43,7 +43,15 @@ public sealed class SoundManager
     private readonly Dictionary<string, DateTime> _cooldowns = new Dictionary<string, DateTime>();
 
     public bool Enabled { get; set; } = true;
+    public int MasterVolumePercent { get; set; } = 100;
+    public int UiVolumePercent { get; set; } = 100;
+    public int WorldVolumePercent { get; set; } = 100;
+    public bool SpatialAudioEnabled { get; set; } = true;
     public string LastMixInfo { get; private set; } = "AUDIO stereo procedural";
+
+    private float MasterVolume => Math.Clamp(MasterVolumePercent / 100f, 0f, 1f);
+    private float UiVolume => Math.Clamp(UiVolumePercent / 100f, 0f, 1f);
+    private float WorldVolume => Math.Clamp(WorldVolumePercent / 100f, 0f, 1f);
 
     public void PlayUi(UiSound cue)
     {
@@ -52,22 +60,24 @@ public sealed class SoundManager
             return;
         }
 
+        float volumeScale = MasterVolume * UiVolume;
+
         switch (cue)
         {
             case UiSound.Hover:
-                PlayTone(650f, 0.05f, 0f, 0.16f, "ui_hover", 50);
+                PlayTone(650f, 0.05f, 0f, 0.16f * volumeScale, "ui_hover", 50);
                 break;
             case UiSound.Click:
-                PlayTone(860f, 0.08f, 0f, 0.22f, "ui_click", 40);
+                PlayTone(860f, 0.08f, 0f, 0.22f * volumeScale, "ui_click", 40);
                 break;
             case UiSound.Back:
-                PlayTone(420f, 0.08f, 0f, 0.2f, "ui_back", 80);
+                PlayTone(420f, 0.08f, 0f, 0.2f * volumeScale, "ui_back", 80);
                 break;
             case UiSound.Start:
-                PlayTone(980f, 0.12f, 0f, 0.28f, "ui_start", 120);
+                PlayTone(980f, 0.12f, 0f, 0.28f * volumeScale, "ui_start", 120);
                 break;
             default:
-                PlayTone(220f, 0.12f, 0f, 0.24f, "ui_error", 120);
+                PlayTone(220f, 0.12f, 0f, 0.24f * volumeScale, "ui_error", 120);
                 break;
         }
     }
@@ -81,8 +91,9 @@ public sealed class SoundManager
 
         Vector2 delta = source - listener;
         float dist = delta.Length();
-        float attenuation = Math.Clamp(1f - dist / Math.Max(1f, maxDistance), 0.04f, 1f);
-        float pan = use3D ? Math.Clamp(delta.X / Math.Max(1f, maxDistance), -1f, 1f) : 0f;
+        bool spatial = use3D && SpatialAudioEnabled;
+        float attenuation = Math.Clamp(1f - dist / Math.Max(1f, maxDistance), 0.04f, 1f) * MasterVolume * WorldVolume;
+        float pan = spatial ? Math.Clamp(delta.X / Math.Max(1f, maxDistance), -1f, 1f) : 0f;
 
         float freq;
         float duration;
@@ -159,7 +170,7 @@ public sealed class SoundManager
                 break;
         }
 
-        LastMixInfo = $"AUDIO {(use3D ? "3D" : "2D")} pan {pan:0.00} attn {attenuation:0.00}";
+        LastMixInfo = $"AUDIO {(spatial ? "3D" : "2D")} pan {pan:0.00} attn {attenuation:0.00}";
 
         if (cue == WorldSound.CrateHit)
         {

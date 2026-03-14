@@ -13,12 +13,14 @@ public sealed partial class Game
 {
     private enum GamePhase
     {
+        Splash,
         Title,
         MultiplayerMenu,
         LanBrowser,
         Settings,
         HostSetup,
         JoinSetup,
+        Loading,
         Playing,
         Paused,
         GameOver
@@ -139,9 +141,10 @@ public sealed partial class Game
     private float _renderMs;
     private float _frameMs;
     private string _rendererLabel = "GDI+ CPU renderer";
+    private string _preferredCallsign = "P1";
     private readonly float[] _frameGraph = new float[100];
     private int _frameGraphHead;
-    private GamePhase _phase = GamePhase.Title;
+    private GamePhase _phase = GamePhase.Splash;
     private DifficultyMode _difficulty = DifficultyMode.Survival;
     private UiScaleMode _uiScale = UiScaleMode.Normal;
 
@@ -163,6 +166,9 @@ public sealed partial class Game
     private bool _showHints = true;
     private bool _shuffleArenaOnStart = true;
     private bool _showNetworkDebug = false;
+    private bool _screenShaderEnabled = true;
+    private bool _worldParticlesEnabled = true;
+    private bool _screenShakeEnabled = true;
     private int _activeMapSeed;
     private float _backgroundPulse;
     private int _scrapCraftCost = 4;
@@ -540,10 +546,11 @@ public sealed partial class Game
         Color baseColor = button.Id switch
         {
             "solo" or "hoststart" or "joinstart" or "resume" or "retry" => Player.Accent,
-            "settings" or "difficulty" or "uiscale" or "hints" or "audio" or "netdebug" or "fpshud" or "perfhud" => Color.FromArgb(66, 116, 146),
+            "settings" or "difficulty" or "uiscale" or "hints" or "audio" or "netdebug" or "fpshud" or "perfhud" or "menuart" or "splashlogo" => Color.FromArgb(66, 116, 146),
             "shuffle" or "paste" or "localhost" => Color.FromArgb(72, 124, 94),
             "portminus" or "portplus" or "maxminus" or "maxplus" => Color.FromArgb(132, 96, 58),
-            "title" or "back" => Color.FromArgb(84, 92, 108),
+            "disconnect" or "stopserver" or "title" or "back" => Color.FromArgb(84, 92, 108),
+            "exit" => Color.FromArgb(132, 74, 74),
             _ => Color.FromArgb(76, 90, 108)
         };
 
@@ -745,7 +752,7 @@ public sealed partial class Game
     private Point _lastMouseScreen;
 
     public TileMap Map { get; }
-    public Player Player => _players.Count > 0 ? _players[0] : new Player(new Vector2(160f, 160f), "P1", Color.Cyan);
+    public Player Player => _players.Count > 0 ? _players[0] : new Player(new Vector2(160f, 160f), _preferredCallsign, Color.Cyan);
     public Vector2 Camera { get; private set; }
     public int WaveNumber => _waveNumber;
 
@@ -758,8 +765,10 @@ public sealed partial class Game
         }
 
         _rng = new Random(_activeMapSeed);
-        Map = new TileMap(104, 68, _rng);
+        Map = new TileMap(104, 68, _rng, buildNow: false);
+        LoadPersistentSettings();
         ResetToTitle();
+        BeginStartupSplash();
     }
 
     private void RebuildArenaForCurrentMode()
@@ -772,7 +781,7 @@ public sealed partial class Game
             return;
         }
 
-        if (_shuffleArenaOnStart)
+        if (_shuffleArenaOnStart || !Map.IsGenerated)
         {
             _activeMapSeed = unchecked((int)(DateTime.UtcNow.Ticks & 0x7FFFFFFF));
             if (_activeMapSeed == 0)
@@ -808,11 +817,10 @@ public sealed partial class Game
         _nightRewardGranted = false;
         _dayNight.Reset(true);
         ClearRuntime();
+        ClearChatHistory();
         _network.Stop();
-        SetupPlayers("P1", Color.FromArgb(92, 220, 255));
-        RebuildArenaForCurrentMode();
-        SeedScavenge();
-        SetAnnouncement("Cursor-driven menu online", 1.8f);
+        SetupPlayers(_preferredCallsign, Color.FromArgb(92, 220, 255));
+        SetAnnouncement("Menu ready", 1.2f);
     }
 
     private void RestartRun(string callsign, Color accent)
@@ -844,6 +852,7 @@ public sealed partial class Game
         }
 
         _phase = GamePhase.Playing;
+        SeedSessionChat();
         SetAnnouncement(_network.Mode switch
         {
             NetMode.Host => $"Host simulation armed · seed {_activeMapSeed}",
@@ -1607,8 +1616,12 @@ public sealed partial class Game
         _qualitySwitchCooldown = Math.Max(0f, _qualitySwitchCooldown - dt);
         _miniMapCacheTimer = Math.Max(0f, _miniMapCacheTimer - dt);
         UpdateHitFeedback(dt);
+        PumpIncomingChatMessages();
         switch (_phase)
         {
+            case GamePhase.Splash:
+                UpdateSplash(dt, input, clientSize);
+                break;
             case GamePhase.Title:
                 UpdateTitle(input, clientSize);
                 break;
@@ -1626,6 +1639,9 @@ public sealed partial class Game
                 break;
             case GamePhase.JoinSetup:
                 UpdateJoinSetup(input, clientSize);
+                break;
+            case GamePhase.Loading:
+                UpdateLoading(dt, input, clientSize);
                 break;
             case GamePhase.Playing:
                 UpdatePlaying(dt, input, clientSize);
@@ -1650,6 +1666,7 @@ public sealed partial class Game
             _ => DifficultyMode.Casual
         };
         _sound.PlayUi(UiSound.Click);
+        SavePersistentSettings();
         SetAnnouncement("Difficulty: " + GetDifficultyName(), 1f);
     }
 
@@ -1662,6 +1679,7 @@ public sealed partial class Game
             _ => UiScaleMode.Tiny
         };
         _sound.PlayUi(UiSound.Click);
+        SavePersistentSettings();
         SetAnnouncement("UI scale: " + GetUiScaleName(), 1f);
     }
 
@@ -1860,16 +1878,17 @@ public sealed partial class Game
         }
 
         player.Tick(dt);
+        bool chatBlockingInput = HandleGameplayChatInput(input, clientSize);
 
         Vector2 move = Vector2.Zero;
-        if (input.IsDown(Keys.W)) move.Y -= 1f;
-        if (input.IsDown(Keys.S)) move.Y += 1f;
-        if (input.IsDown(Keys.A)) move.X -= 1f;
-        if (input.IsDown(Keys.D)) move.X += 1f;
+        if (!chatBlockingInput && input.IsDown(Keys.W)) move.Y -= 1f;
+        if (!chatBlockingInput && input.IsDown(Keys.S)) move.Y += 1f;
+        if (!chatBlockingInput && input.IsDown(Keys.A)) move.X -= 1f;
+        if (!chatBlockingInput && input.IsDown(Keys.D)) move.X += 1f;
         move = Phys.NormalizeSafe(move);
         player.SetMoveBlend(move.LengthSquared() > 0.001f ? 1f : 0f, move);
 
-        if (input.WasPressed(Keys.Space))
+        if (!chatBlockingInput && input.WasPressed(Keys.Space))
         {
             player.TryStartDash(move);
         }
@@ -1883,6 +1902,13 @@ public sealed partial class Game
         if (aimVector.LengthSquared() > 1f)
         {
             player.AimAngle = MathF.Atan2(aimVector.Y, aimVector.X);
+        }
+
+        if (chatBlockingInput)
+        {
+            _pistolTriggerBufferTimer = 0f;
+            PushLocalPlayerNetworkState(player);
+            return;
         }
 
         if (input.WasPressed(Keys.D1)) ActivateHotbarSlot(player, 0, clientSize);
@@ -2005,46 +2031,7 @@ public sealed partial class Game
             }
         }
 
-        _network.PushLocalState(
-            player.Callsign,
-            player.Accent,
-            player.Position,
-            player.AimAngle,
-            player.Health,
-            player.IsAlive,
-            player.Armor,
-            player.MaxHealth,
-            player.Weapon.Name,
-            player.CurrentWeapon.Level,
-            player.SelectedWeaponIndex,
-            GetSelectedHotbarRawIndex(),
-            player.CurrentWeapon.AmmoInClip,
-            player.CurrentWeapon.AmmoReserve,
-            player.Credits,
-            player.Scrap,
-            player.BarricadeKits,
-            player.Kills,
-            player.TurretCharges,
-            player.MaxTurretCharges,
-            player.Adrenaline,
-            player.MaxAdrenaline,
-            player.LastMoveInput,
-            player.MoveBlend,
-            player.FireTimer,
-            player.WeaponStateSequence,
-            player.IsReloading,
-            player.ReloadTimer,
-            player.IsOverdriveActive,
-            player.ShootAnimation,
-            player.PickupAnimation,
-            player.UseAnimation,
-            player.ReloadAnimation,
-            player.ShotSequence,
-            player.GrenadeSequence,
-            player.TurretSequence,
-            player.BarricadeSequence,
-            player.OverdriveSequence,
-            player.PickupSequence);
+        PushLocalPlayerNetworkState(player);
     }
 
     private static Weapon GetWeaponDefinitionByName(string sourceWeaponName)
@@ -3743,7 +3730,7 @@ public sealed partial class Game
     {
         Vector2 target = Player.Position;
         Vector2 shake = Vector2.Zero;
-        if (_screenShakeTimer > 0f && _screenShakePower > 0.01f)
+        if (_screenShakeEnabled && _screenShakeTimer > 0f && _screenShakePower > 0.01f)
         {
             float kickFactor = MathF.Min(1f, _damagePulse * 1.4f);
             Vector2 randomShake = new Vector2(((float)_rng.NextDouble() * 2f - 1f), ((float)_rng.NextDouble() * 2f - 1f));
@@ -3763,6 +3750,7 @@ public sealed partial class Game
     public void Draw(Graphics g, Size clientSize, InputState input)
     {
         bool fast = _renderFps < 55f || _updateFps < 55f;
+        bool showWorld = _phase == GamePhase.Playing || _phase == GamePhase.Paused || _phase == GamePhase.GameOver;
 
         g.Clear(Color.FromArgb(10, 12, 16));
 
@@ -3772,7 +3760,14 @@ public sealed partial class Game
         g.CompositingQuality = CompositingQuality.HighSpeed;
         g.TextRenderingHint = fast ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.ClearTypeGridFit;
 
-        DrawWorld(g, clientSize);
+        if (showWorld)
+        {
+            DrawWorld(g, clientSize);
+        }
+        else
+        {
+            DrawMenuBackdrop(g, clientSize);
+        }
 
         if (!fast)
         {
@@ -3783,34 +3778,41 @@ public sealed partial class Game
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
         }
 
-        DrawDayNightOverlay(g, clientSize);
-        DrawScreenShader(g, clientSize, fast);
-        DrawCrosshairOverlay(g);
+        if (showWorld)
+        {
+            DrawDayNightOverlay(g, clientSize);
+            if (_screenShaderEnabled)
+            {
+                DrawScreenShader(g, clientSize, fast);
+            }
+            DrawCrosshairOverlay(g);
+        }
 
         switch (_phase)
         {
+            case GamePhase.Splash:
+                DrawSplashScreen(g, clientSize);
+                break;
             case GamePhase.Title:
                 DrawTitle(g, clientSize);
                 break;
             case GamePhase.MultiplayerMenu:
-                DrawWorldTint(g, clientSize, 150);
                 DrawMultiplayerMenu(g, clientSize);
                 break;
             case GamePhase.LanBrowser:
-                DrawWorldTint(g, clientSize, 150);
                 DrawLanBrowser(g, clientSize);
                 break;
             case GamePhase.Settings:
-                DrawWorldTint(g, clientSize, 150);
                 DrawSettings(g, clientSize);
                 break;
             case GamePhase.HostSetup:
-                DrawWorldTint(g, clientSize, 150);
                 DrawHostSetup(g, clientSize);
                 break;
             case GamePhase.JoinSetup:
-                DrawWorldTint(g, clientSize, 150);
                 DrawJoinSetup(g, clientSize);
+                break;
+            case GamePhase.Loading:
+                DrawLoadingScreen(g, clientSize);
                 break;
             case GamePhase.Playing:
                 DrawHud(g, clientSize);
@@ -3851,7 +3853,10 @@ public sealed partial class Game
         DrawSupportPlacementPreview(g, clientSize);
         DrawPlayers(g);
         DrawRemotePlayers(g);
-        DrawWorldParticles(g);
+        if (_worldParticlesEnabled)
+        {
+            DrawWorldParticles(g);
+        }
 
         g.ResetTransform();
     }
@@ -5123,23 +5128,36 @@ public sealed partial class Game
 
     private void DrawSettings(Graphics g, Size clientSize)
     {
-        DrawMenuHeader(g, clientSize, "Settings", "UI, difficulty, audio and debug controls");
+        DrawMenuHeader(g, clientSize, "Settings", GetSettingsPanelSubtitle());
 
-        RectangleF panel = GetMenuButtonsBounds(18f, 18f);
-        panel = new RectangleF(panel.X - 14f, panel.Y - 8f, panel.Width + 28f, panel.Height + 18f);
-        DrawMenuCard(g, panel, Color.FromArgb(76, 122, 150), "CONFIG");
+        float s = GetMenuScale(new Vector2(clientSize.Width, clientSize.Height));
+        float navWidth = 220f * s;
+        float contentWidth = 520f * s;
+        float gap = 12f * s;
+        float totalWidth = navWidth + gap + contentWidth;
+        float navX = (clientSize.Width - totalWidth) * 0.5f;
+        float contentX = navX + navWidth + gap;
+        RectangleF navPanel = new RectangleF(navX, 182f * s, navWidth, 404f * s);
+        RectangleF contentPanel = new RectangleF(contentX, 182f * s, contentWidth, 300f * s);
+        DrawMenuCard(g, navPanel, Color.FromArgb(74, 108, 138), "TABS");
+        DrawMenuCard(g, contentPanel, Color.FromArgb(76, 122, 150), "CONFIG");
+
+        using SolidBrush headingBrush = new SolidBrush(Color.WhiteSmoke);
+        using SolidBrush bodyBrush = new SolidBrush(Color.Gainsboro);
+        g.DrawString(GetSettingsPanelTitle(), _menuFont, headingBrush, contentPanel.Left + 18f, contentPanel.Top + 18f);
+        g.DrawString(GetSettingsPanelSubtitle(), _smallFont, bodyBrush, new RectangleF(contentPanel.Left + 18f, contentPanel.Top + 48f, contentPanel.Width - 36f, 32f));
 
         foreach (MenuButton button in _menuButtons)
         {
             DrawMenuButton(g, button, button.Contains(_lastMouseScreen));
         }
 
-        float chipsY = panel.Bottom + 12f;
-        DrawLabelPill(g, "HUD " + GetUiScaleName(), _tinyFont, new RectangleF(clientSize.Width / 2f - 150f, chipsY, 92f, 18f), Color.FromArgb(78, 102, 126), Color.WhiteSmoke);
-        DrawLabelPill(g, _showHints ? "Hints ON" : "Hints OFF", _tinyFont, new RectangleF(clientSize.Width / 2f - 46f, chipsY, 92f, 18f), _showHints ? Color.FromArgb(74, 128, 96) : Color.FromArgb(104, 88, 88), Color.WhiteSmoke);
-        DrawLabelPill(g, _sound.Enabled ? "Audio ON" : "Audio OFF", _tinyFont, new RectangleF(clientSize.Width / 2f + 58f, chipsY, 92f, 18f), _sound.Enabled ? Color.FromArgb(124, 90, 58) : Color.FromArgb(92, 92, 102), Color.WhiteSmoke);
+        float chipsY = contentPanel.Bottom + 14f;
+        DrawLabelPill(g, GetSettingsTabName(_settingsTab), _tinyFont, new RectangleF(clientSize.Width / 2f - 150f, chipsY, 92f, 18f), Color.FromArgb(78, 102, 126), Color.WhiteSmoke);
+        DrawLabelPill(g, _sound.Enabled ? "Audio ON" : "Audio OFF", _tinyFont, new RectangleF(clientSize.Width / 2f - 46f, chipsY, 92f, 18f), _sound.Enabled ? Color.FromArgb(124, 90, 58) : Color.FromArgb(92, 92, 102), Color.WhiteSmoke);
+        DrawLabelPill(g, _showNetworkDebug ? "Net DBG" : "Net Clean", _tinyFont, new RectangleF(clientSize.Width / 2f + 58f, chipsY, 92f, 18f), _showNetworkDebug ? Color.FromArgb(74, 128, 96) : Color.FromArgb(104, 88, 88), Color.WhiteSmoke);
 
-        DrawFooterText(g, clientSize, "Compact menu, darker surfaces, cleaner contrast.");
+        DrawFooterText(g, clientSize, "Tab list stays on the left, actual options stay on the right. Much less cursed.");
     }
 
     private void DrawHostSetup(Graphics g, Size clientSize)
@@ -5186,7 +5204,7 @@ public sealed partial class Game
 
     private void DrawPauseMenu(Graphics g, Size clientSize)
     {
-        DrawMenuHeader(g, clientSize, "Paused", "Take a breath, then go back to murder");
+        DrawMenuHeader(g, clientSize, "Paused", GetPauseMenuSubtitle());
 
         RectangleF panel = GetMenuButtonsBounds(18f, 18f);
         panel = new RectangleF(panel.X - 18f, panel.Y - 8f, panel.Width + 36f, panel.Height + 18f);
@@ -5197,7 +5215,7 @@ public sealed partial class Game
             DrawMenuButton(g, button, button.Contains(_lastMouseScreen));
         }
 
-        DrawFooterText(g, clientSize, "Esc resumes. Title throws you out of the current run.");
+        DrawFooterText(g, clientSize, _network.Mode == NetMode.None ? "Esc resumes. Title throws you out of the current run." : "Esc resumes. Session control and exit live right here now.");
     }
 
     private void DrawGameOver(Graphics g, Size clientSize)

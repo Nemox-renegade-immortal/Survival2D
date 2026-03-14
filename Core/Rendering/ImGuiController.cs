@@ -120,7 +120,8 @@ public sealed unsafe class ImGuiController : IDisposable
         {
             Path.Combine(windowsFonts, "segoeui.ttf"),
             Path.Combine(windowsFonts, "tahoma.ttf"),
-            Path.Combine(windowsFonts, "arial.ttf")
+            Path.Combine(windowsFonts, "arial.ttf"),
+            Path.Combine(windowsFonts, "verdana.ttf")
         };
 
         string? fontPath = null;
@@ -135,7 +136,7 @@ public sealed unsafe class ImGuiController : IDisposable
 
         if (!string.IsNullOrWhiteSpace(fontPath))
         {
-            io.Fonts.AddFontFromFileTTF(fontPath, fontSize);
+            io.Fonts.AddFontFromFileTTF(fontPath, fontSize, null, io.Fonts.GetGlyphRangesCyrillic());
         }
         else
         {
@@ -216,6 +217,11 @@ public sealed unsafe class ImGuiController : IDisposable
         SetKey(io, ImGuiKey.ModShift, shift);
         SetKey(io, ImGuiKey.ModAlt, alt);
         SetKey(io, ImGuiKey.ModSuper, super);
+
+        foreach (int codepoint in input.TextInputCodepoints)
+        {
+            io.AddInputCharacter((uint)codepoint);
+        }
     }
 
     private static void SetKey(ImGuiIOPtr io, ImGuiKey key, bool down)

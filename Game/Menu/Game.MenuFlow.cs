@@ -75,7 +75,7 @@ public sealed partial class Game
             return;
         }
 
-        HandleMenuInput(input, ActivateSettingsButton, "difficulty");
+        HandleMenuInput(input, ActivateSettingsButton, GetDefaultSettingsButtonId());
     }
 
     private void UpdateHostSetup(InputState input, Size clientSize)
@@ -166,7 +166,8 @@ public sealed partial class Game
             ("solo", "Solo run", true),
             ("multi", "Multiplayer", true),
             ("settings", "Settings", true),
-            ("shuffle", _shuffleArenaOnStart ? "Arena shuffle: ON" : "Arena shuffle: OFF", true));
+            ("shuffle", _shuffleArenaOnStart ? "Arena shuffle: ON" : "Arena shuffle: OFF", true),
+            ("exit", "Exit", true));
 
         Vector2 screen = new Vector2(clientSize.Width, clientSize.Height);
         float s = GetMenuScale(screen);
@@ -187,18 +188,12 @@ public sealed partial class Game
 
     private void BuildSettingsMenu(Size clientSize)
     {
-        CreateMenuButtons(
-            ("difficulty", $"Difficulty: {GetDifficultyName()}", true),
-            ("uiscale", $"HUD scale: {GetUiScaleName()}", true),
-            ("hints", _showHints ? "Hints: ON" : "Hints: OFF", true),
-            ("audio", _sound.Enabled ? "Audio: ON" : "Audio: OFF", true),
-            ("netdebug", _showNetworkDebug ? "Net debug: ON" : "Net debug: OFF", true),
-            ("fpshud", _showFpsHud ? "FPS HUD: ON" : "FPS HUD: OFF", true),
-            ("perfhud", _showPerfHud ? "Perf HUD: ON" : "Perf HUD: OFF", true),
-            ("back", "Back", true));
-
-        float s = GetMenuScale(new Vector2(clientSize.Width, clientSize.Height));
-        LayoutMenuButtons(new Vector2(clientSize.Width, clientSize.Height), 166f * s, 500f * s, 56f * s, 10f * s, 20f * s);
+        List<(string id, string label, bool enabled)> items = new List<(string id, string label, bool enabled)>();
+        items.AddRange(GetSettingsTabButtons());
+        items.AddRange(GetSettingsActionButtons());
+        items.Add(("back", "Back", true));
+        CreateMenuButtons(items.ToArray());
+        LayoutSettingsButtons(new Vector2(clientSize.Width, clientSize.Height));
     }
 
     private void BuildHostMenu(Size clientSize)
@@ -263,7 +258,8 @@ public sealed partial class Game
         CreateMenuButtons(
             ("resume", "Resume", true),
             ("settings", "Settings", true),
-            ("title", "Return to title", true));
+            (GetPauseSessionActionId(), GetPauseSessionActionLabel(), true),
+            ("exit", "Exit", true));
 
         float s = GetMenuScale(new Vector2(clientSize.Width, clientSize.Height));
         LayoutMenuButtons(new Vector2(clientSize.Width, clientSize.Height), 166f * s, 430f * s, 56f * s, 10f * s, 20f * s);
@@ -368,8 +364,7 @@ public sealed partial class Game
         switch (id)
         {
             case "solo":
-                _network.Stop();
-                RestartRun("P1", Color.FromArgb(92, 220, 255));
+                QueueSoloLaunch();
                 break;
             case "multi":
                 _phase = GamePhase.MultiplayerMenu;
@@ -377,13 +372,18 @@ public sealed partial class Game
                 break;
             case "settings":
                 _settingsReturnPhase = GamePhase.Title;
+                SyncMenuInputBuffers();
                 _phase = GamePhase.Settings;
                 _sound.PlayUi(UiSound.Click);
                 break;
             case "shuffle":
                 _shuffleArenaOnStart = !_shuffleArenaOnStart;
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement(_shuffleArenaOnStart ? "Arena shuffle enabled" : "Arena shuffle disabled", 1f);
+                break;
+            case "exit":
+                RequestExit();
                 break;
         }
     }
@@ -393,10 +393,12 @@ public sealed partial class Game
         switch (id)
         {
             case "host":
+                SyncMenuInputBuffers();
                 _phase = GamePhase.HostSetup;
                 _sound.PlayUi(UiSound.Click);
                 break;
             case "join":
+                SyncMenuInputBuffers();
                 _phase = GamePhase.JoinSetup;
                 _sound.PlayUi(UiSound.Click);
                 break;
@@ -446,22 +448,17 @@ public sealed partial class Game
         }
 
         _joinPort = Math.Clamp(parsedPort, 1, 65535);
-        try
-        {
-            string callsign = "P1";
-            _network.Join(_joinAddress, _joinPort, callsign);
-            RestartRun(callsign, Color.FromArgb(92, 220, 255));
-        }
-        catch
-        {
-            _network.Stop();
-            _sound.PlayUi(UiSound.Error);
-            SetAnnouncement("LAN join failed", 1.4f);
-        }
+        SyncMenuInputBuffers();
+        QueueJoinLaunch(GamePhase.LanBrowser, "Joining LAN server", "LAN join failed");
     }
 
     private void ActivateSettingsButton(string id)
     {
+        if (TrySelectSettingsTab(id))
+        {
+            return;
+        }
+
         switch (id)
         {
             case "difficulty":
@@ -470,24 +467,95 @@ public sealed partial class Game
             case "uiscale":
                 CycleUiScale();
                 break;
+            case "nicknamepaste":
+                TryPasteNickname();
+                break;
+            case "nicknamereset":
+                ResetNickname();
+                break;
             case "hints":
                 _showHints = !_showHints;
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement(_showHints ? "Hints enabled" : "Hints disabled", 1f);
                 break;
             case "audio":
                 _sound.Enabled = !_sound.Enabled;
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement(_sound.Enabled ? "Audio enabled" : "Audio disabled", 1f);
+                break;
+            case "audiomaster":
+                CyclePercentSetting(SetMasterVolumePercent, _sound.MasterVolumePercent);
+                SetAnnouncement($"Master volume: {_sound.MasterVolumePercent}%", 1f);
+                break;
+            case "audioui":
+                CyclePercentSetting(SetUiVolumePercent, _sound.UiVolumePercent);
+                SetAnnouncement($"UI volume: {_sound.UiVolumePercent}%", 1f);
+                break;
+            case "audioworld":
+                CyclePercentSetting(SetWorldVolumePercent, _sound.WorldVolumePercent);
+                SetAnnouncement($"World volume: {_sound.WorldVolumePercent}%", 1f);
+                break;
+            case "audiospatial":
+                _sound.SpatialAudioEnabled = !_sound.SpatialAudioEnabled;
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement(_sound.SpatialAudioEnabled ? "3D audio enabled" : "3D audio disabled", 1f);
+                break;
+            case "menuart":
+                _menuArtworkEnabled = !_menuArtworkEnabled;
+                InvalidateMenuArtworkCache();
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement(_menuArtworkEnabled ? "Menu artwork enabled" : "Menu backdrop forced to black", 1f);
+                break;
+            case "splashlogo":
+                _splashLogoEnabled = !_splashLogoEnabled;
+                InvalidateMenuArtworkCache();
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement(_splashLogoEnabled ? "Splash logo enabled" : "Splash logo hidden", 1f);
+                break;
+            case "shader":
+                _screenShaderEnabled = !_screenShaderEnabled;
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement(_screenShaderEnabled ? "Screen shader enabled" : "Screen shader disabled", 1f);
+                break;
+            case "particles":
+                _worldParticlesEnabled = !_worldParticlesEnabled;
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement(_worldParticlesEnabled ? "World particles enabled" : "World particles disabled", 1f);
+                break;
+            case "screenshake":
+                _screenShakeEnabled = !_screenShakeEnabled;
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement(_screenShakeEnabled ? "Screen shake enabled" : "Screen shake disabled", 1f);
+                break;
+            case "joinpaste":
+                PasteJoinAddress();
+                break;
+            case "joinreset":
+                _joinAddress = "127.0.0.1";
+                _joinPort = 7777;
+                SyncMenuInputBuffers();
+                _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
+                SetAnnouncement($"Join target reset: {_joinAddress}:{_joinPort}", 1.1f);
                 break;
             case "netdebug":
                 _showNetworkDebug = !_showNetworkDebug;
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement(_showNetworkDebug ? "Net debug enabled" : "Net debug disabled", 1f);
                 break;
             case "fpshud":
                 _showFpsHud = !_showFpsHud;
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement(_showFpsHud ? "FPS HUD enabled" : "FPS HUD disabled", 1f);
                 break;
             case "perfhud":
@@ -497,6 +565,7 @@ public sealed partial class Game
                     _showFpsHud = true;
                 }
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement(_showPerfHud ? "Performance HUD enabled" : "Performance HUD disabled", 1f);
                 break;
             case "back":
@@ -511,34 +580,36 @@ public sealed partial class Game
         {
             case "portminus":
                 _joinPort = Math.Max(1024, _joinPort - 1);
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 break;
             case "portplus":
                 _joinPort = Math.Min(65535, _joinPort + 1);
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 break;
             case "maxminus":
                 _maxPlayers = Math.Max(1, _maxPlayers - 1);
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 break;
             case "maxplus":
                 _maxPlayers = Math.Min(64, _maxPlayers + 1);
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 break;
             case "hoststart":
-                try
-                {
-                    _network.StartHost(_joinPort, _maxPlayers);
-                    RestartRun("HOST", Color.FromArgb(92, 220, 255));
-                }
-                catch
-                {
-                    _network.Stop();
-                    _sound.PlayUi(UiSound.Error);
-                    SetAnnouncement("Host startup failed", 1.4f);
-                }
+                CommitHostPortInput();
+                CommitHostSlotsInput();
+                QueueHostLaunch();
                 break;
             case "back":
+                CommitHostPortInput();
+                CommitHostSlotsInput();
                 _phase = GamePhase.MultiplayerMenu;
                 _sound.PlayUi(UiSound.Back);
                 break;
@@ -554,32 +625,31 @@ public sealed partial class Game
                 break;
             case "localhost":
                 _joinAddress = "127.0.0.1";
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 SetAnnouncement("Join target set to localhost", 1f);
                 break;
             case "portminus":
                 _joinPort = Math.Max(1, _joinPort - 1);
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 break;
             case "portplus":
                 _joinPort = Math.Min(65535, _joinPort + 1);
+                SyncMenuInputBuffers();
                 _sound.PlayUi(UiSound.Click);
+                SavePersistentSettings();
                 break;
             case "joinstart":
-                try
-                {
-                    string callsign = "P1";
-                    _network.Join(_joinAddress, _joinPort, callsign);
-                    RestartRun(callsign, Color.FromArgb(92, 220, 255));
-                }
-                catch
-                {
-                    _network.Stop();
-                    _sound.PlayUi(UiSound.Error);
-                    SetAnnouncement("Join failed", 1.4f);
-                }
+                CommitJoinAddressInput();
+                CommitJoinPortInput();
+                QueueJoinLaunch(GamePhase.JoinSetup, "Connecting to server", "Join failed");
                 break;
             case "back":
+                CommitJoinAddressInput();
+                CommitJoinPortInput();
                 _phase = GamePhase.MultiplayerMenu;
                 _sound.PlayUi(UiSound.Back);
                 break;
@@ -596,12 +666,17 @@ public sealed partial class Game
                 break;
             case "settings":
                 _settingsReturnPhase = GamePhase.Paused;
+                SyncMenuInputBuffers();
                 _phase = GamePhase.Settings;
                 _sound.PlayUi(UiSound.Click);
                 break;
             case "title":
-                ResetToTitle();
-                _sound.PlayUi(UiSound.Back);
+            case "disconnect":
+            case "stopserver":
+                LeaveSessionOrReturnToTitle();
+                break;
+            case "exit":
+                RequestExit();
                 break;
         }
     }
@@ -614,14 +689,19 @@ public sealed partial class Game
                 RetryCurrentMode();
                 break;
             case "title":
-                ResetToTitle();
-                _sound.PlayUi(UiSound.Back);
+            case "disconnect":
+            case "stopserver":
+                LeaveSessionOrReturnToTitle();
+                break;
+            case "exit":
+                RequestExit();
                 break;
         }
     }
 
     private void ReturnFromSettings()
     {
+        CommitNicknameInput(false);
         _phase = _settingsReturnPhase == GamePhase.Paused ? GamePhase.Paused : GamePhase.Title;
         _sound.PlayUi(UiSound.Back);
     }
@@ -629,7 +709,7 @@ public sealed partial class Game
     private void RetryCurrentMode()
     {
         Player player = Player;
-        RestartRun(player.Callsign, player.Accent);
+        RestartRun(_preferredCallsign, player.Accent);
     }
 
     private void PasteJoinAddress()
@@ -645,7 +725,9 @@ public sealed partial class Game
             }
 
             ApplyJoinAddress(text);
+            SyncMenuInputBuffers();
             _sound.PlayUi(UiSound.Click);
+            SavePersistentSettings();
             SetAnnouncement($"Join target: {_joinAddress}:{_joinPort}", 1.2f);
         }
         catch

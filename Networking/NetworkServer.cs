@@ -44,6 +44,7 @@ public sealed class NetworkServer : IDisposable
     private int _nextId = 1;
     private NetPlayerState _hostState = CreateDefaultPlayerState(0, "HOST", unchecked((int)0xFF5CD8FF));
     private NetWorldState _hostWorldState = new NetWorldState();
+    private readonly ConcurrentQueue<NetChatMessage> _hostChatQueue = new ConcurrentQueue<NetChatMessage>();
 
     public int Port { get; }
     public int MaxPlayers { get; }
@@ -112,6 +113,42 @@ public sealed class NetworkServer : IDisposable
         {
             return _hostWorldState.Clone();
         }
+    }
+
+
+    public void BroadcastHostChat(string sender, int accentArgb, string message)
+    {
+        string cleanMessage = SanitizeChatText(message);
+        if (string.IsNullOrWhiteSpace(cleanMessage))
+        {
+            return;
+        }
+
+        NetChatMessage chat = new NetChatMessage
+        {
+            SenderPlayerId = 0,
+            Sender = string.IsNullOrWhiteSpace(sender) ? _hostState.Callsign : sender.Trim(),
+            Message = cleanMessage,
+            AccentArgb = accentArgb,
+            ServerUtcTicks = DateTime.UtcNow.Ticks,
+            IsSystem = false
+        };
+
+        BroadcastChat(chat, false);
+    }
+
+    public List<NetChatMessage> DequeueHostChatMessages()
+    {
+        List<NetChatMessage> result = new List<NetChatMessage>();
+        while (_hostChatQueue.TryDequeue(out NetChatMessage? message))
+        {
+            if (message is not null)
+            {
+                result.Add(CloneChat(message));
+            }
+        }
+
+        return result;
     }
 
     public bool TryApplyDamageToPlayer(int playerId, int damage)
@@ -365,6 +402,23 @@ public sealed class NetworkServer : IDisposable
                             });
                         }
                     }
+                    else if (string.Equals(kind, "chat", StringComparison.OrdinalIgnoreCase))
+                    {
+                        NetChatMessage? chat = JsonSerializer.Deserialize<NetChatMessage>(line, _jsonOptions);
+                        if (chat is not null)
+                        {
+                            chat.SenderPlayerId = assignedId;
+                            chat.Sender = string.IsNullOrWhiteSpace(peer.State.Callsign) ? $"P{assignedId}" : peer.State.Callsign.Trim();
+                            chat.AccentArgb = peer.State.AccentArgb;
+                            chat.Message = SanitizeChatText(chat.Message);
+                            chat.ServerUtcTicks = DateTime.UtcNow.Ticks;
+                            chat.IsSystem = false;
+                            if (!string.IsNullOrWhiteSpace(chat.Message))
+                            {
+                                BroadcastChat(chat, true);
+                            }
+                        }
+                    }
                 }
                 catch (JsonException)
                 {
@@ -546,6 +600,66 @@ public sealed class NetworkServer : IDisposable
 
             peer.SendSignal.Release();
         }
+    }
+
+
+    private void BroadcastChat(NetChatMessage chat, bool includeHostQueue)
+    {
+        List<ClientPeer> peers;
+        lock (_sync)
+        {
+            peers = _clients.Values.ToList();
+        }
+
+        NetChatMessage payload = CloneChat(chat);
+        foreach (ClientPeer peer in peers)
+        {
+            EnqueueReliable(peer, payload);
+        }
+
+        if (includeHostQueue)
+        {
+            _hostChatQueue.Enqueue(CloneChat(payload));
+        }
+    }
+
+    private static NetChatMessage CloneChat(NetChatMessage chat)
+    {
+        return new NetChatMessage
+        {
+            Kind = chat.Kind,
+            SenderPlayerId = chat.SenderPlayerId,
+            Sender = chat.Sender,
+            Message = chat.Message,
+            AccentArgb = chat.AccentArgb,
+            ServerUtcTicks = chat.ServerUtcTicks,
+            IsSystem = chat.IsSystem
+        };
+    }
+
+    private static string SanitizeChatText(string? raw, int maxLength = 160)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return string.Empty;
+        }
+
+        List<char> chars = new List<char>(Math.Min(maxLength, raw.Length));
+        foreach (char ch in raw.Trim())
+        {
+            if (char.IsControl(ch) && ch != ' ')
+            {
+                continue;
+            }
+
+            chars.Add(ch);
+            if (chars.Count >= maxLength)
+            {
+                break;
+            }
+        }
+
+        return new string(chars.ToArray()).Trim();
     }
 
     private static NetPlayerState CreateDefaultPlayerState(int playerId, string callsign, int accentArgb)

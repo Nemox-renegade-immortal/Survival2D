@@ -35,6 +35,17 @@ public sealed class NetPong
     public long ServerUtcTicks { get; set; } = DateTime.UtcNow.Ticks;
 }
 
+public sealed class NetChatMessage
+{
+    public string Kind { get; set; } = "chat";
+    public int SenderPlayerId { get; set; }
+    public string Sender { get; set; } = "";
+    public string Message { get; set; } = "";
+    public int AccentArgb { get; set; }
+    public long ServerUtcTicks { get; set; } = DateTime.UtcNow.Ticks;
+    public bool IsSystem { get; set; }
+}
+
 public sealed class NetPlayerState
 {
     public string Kind { get; set; } = "state";

@@ -19,24 +19,33 @@ public sealed class ImGuiGameWindow : GameWindow
     private readonly Stopwatch _titleClock = Stopwatch.StartNew();
     private readonly (TkKey tk, WinKey win)[] _keyMap =
     {
-        (TkKey.W, WinKey.W),
         (TkKey.A, WinKey.A),
-        (TkKey.S, WinKey.S),
-        (TkKey.D, WinKey.D),
-        (TkKey.Q, WinKey.Q),
-        (TkKey.E, WinKey.E),
-        (TkKey.R, WinKey.R),
-        (TkKey.F, WinKey.F),
-        (TkKey.G, WinKey.G),
         (TkKey.B, WinKey.B),
         (TkKey.C, WinKey.C),
+        (TkKey.D, WinKey.D),
+        (TkKey.E, WinKey.E),
+        (TkKey.F, WinKey.F),
+        (TkKey.G, WinKey.G),
+        (TkKey.H, WinKey.H),
+        (TkKey.I, WinKey.I),
+        (TkKey.J, WinKey.J),
+        (TkKey.K, WinKey.K),
+        (TkKey.L, WinKey.L),
+        (TkKey.M, WinKey.M),
+        (TkKey.N, WinKey.N),
+        (TkKey.O, WinKey.O),
+        (TkKey.P, WinKey.P),
+        (TkKey.Q, WinKey.Q),
+        (TkKey.R, WinKey.R),
+        (TkKey.S, WinKey.S),
         (TkKey.T, WinKey.T),
-        (TkKey.Tab, WinKey.Tab),
-        (TkKey.Left, WinKey.Left),
-        (TkKey.Right, WinKey.Right),
-        (TkKey.Space, WinKey.Space),
-        (TkKey.Escape, WinKey.Escape),
-        (TkKey.Enter, WinKey.Enter),
+        (TkKey.U, WinKey.U),
+        (TkKey.V, WinKey.V),
+        (TkKey.W, WinKey.W),
+        (TkKey.X, WinKey.X),
+        (TkKey.Y, WinKey.Y),
+        (TkKey.Z, WinKey.Z),
+        (TkKey.D0, WinKey.D0),
         (TkKey.D1, WinKey.D1),
         (TkKey.D2, WinKey.D2),
         (TkKey.D3, WinKey.D3),
@@ -45,7 +54,40 @@ public sealed class ImGuiGameWindow : GameWindow
         (TkKey.D6, WinKey.D6),
         (TkKey.D7, WinKey.D7),
         (TkKey.D8, WinKey.D8),
-        (TkKey.D9, WinKey.D9)
+        (TkKey.D9, WinKey.D9),
+        (TkKey.KeyPad0, WinKey.NumPad0),
+        (TkKey.KeyPad1, WinKey.NumPad1),
+        (TkKey.KeyPad2, WinKey.NumPad2),
+        (TkKey.KeyPad3, WinKey.NumPad3),
+        (TkKey.KeyPad4, WinKey.NumPad4),
+        (TkKey.KeyPad5, WinKey.NumPad5),
+        (TkKey.KeyPad6, WinKey.NumPad6),
+        (TkKey.KeyPad7, WinKey.NumPad7),
+        (TkKey.KeyPad8, WinKey.NumPad8),
+        (TkKey.KeyPad9, WinKey.NumPad9),
+        (TkKey.Tab, WinKey.Tab),
+        (TkKey.Left, WinKey.Left),
+        (TkKey.Right, WinKey.Right),
+        (TkKey.Up, WinKey.Up),
+        (TkKey.Down, WinKey.Down),
+        (TkKey.PageUp, WinKey.PageUp),
+        (TkKey.PageDown, WinKey.PageDown),
+        (TkKey.Home, WinKey.Home),
+        (TkKey.End, WinKey.End),
+        (TkKey.Insert, WinKey.Insert),
+        (TkKey.Delete, WinKey.Delete),
+        (TkKey.Backspace, WinKey.Back),
+        (TkKey.Space, WinKey.Space),
+        (TkKey.Enter, WinKey.Enter),
+        (TkKey.Escape, WinKey.Escape),
+        (TkKey.LeftShift, WinKey.LShiftKey),
+        (TkKey.RightShift, WinKey.RShiftKey),
+        (TkKey.LeftControl, WinKey.LControlKey),
+        (TkKey.RightControl, WinKey.RControlKey),
+        (TkKey.LeftAlt, WinKey.LMenu),
+        (TkKey.RightAlt, WinKey.RMenu),
+        (TkKey.LeftSuper, WinKey.LWin),
+        (TkKey.RightSuper, WinKey.RWin)
     };
 
     private ImGuiController? _imgui;
@@ -107,6 +149,23 @@ public sealed class ImGuiGameWindow : GameWindow
         }
     }
 
+    protected override void OnTextInput(TextInputEventArgs e)
+    {
+        base.OnTextInput(e);
+
+        if (!IsFocused)
+        {
+            return;
+        }
+
+        if (e.Unicode <= 0)
+        {
+            return;
+        }
+
+        _input.AddTextInput(e.Unicode);
+    }
+
     protected override void OnUpdateFrame(FrameEventArgs args)
     {
         base.OnUpdateFrame(args);
@@ -141,7 +200,14 @@ public sealed class ImGuiGameWindow : GameWindow
 
         Stopwatch updateWatch = Stopwatch.StartNew();
         _game.Update(dt, frameInput, new Size(ClientSize.X, ClientSize.Y));
+        bool shouldExit = _game.ConsumeExitRequest();
         updateWatch.Stop();
+
+        if (shouldExit)
+        {
+            Close();
+            return;
+        }
 
         _lastUpdateMs = (float)updateWatch.Elapsed.TotalMilliseconds;
         _lastFrameMs = dt * 1000f;

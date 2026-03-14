@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
 using System.Text.Json;
@@ -14,6 +15,7 @@ public sealed class NetworkClient : IDisposable
     private readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
     private readonly CancellationTokenSource _cts = new CancellationTokenSource();
     private readonly ConcurrentQueue<string> _reliableQueue = new ConcurrentQueue<string>();
+    private readonly ConcurrentQueue<NetChatMessage> _chatQueue = new ConcurrentQueue<NetChatMessage>();
     private readonly SemaphoreSlim _sendSignal = new SemaphoreSlim(0);
     private readonly TaskCompletionSource<NetAssigned> _assignedTcs = new TaskCompletionSource<NetAssigned>(TaskCreationOptions.RunContinuationsAsynchronously);
     private TcpClient? _client;
@@ -136,6 +138,31 @@ public sealed class NetworkClient : IDisposable
         {
             return _latestWorldState.Clone();
         }
+    }
+
+
+    public void SendChat(NetChatMessage message)
+    {
+        if (!IsConnected || message is null)
+        {
+            return;
+        }
+
+        EnqueueReliable(message);
+    }
+
+    public List<NetChatMessage> DequeueChatMessages()
+    {
+        List<NetChatMessage> result = new List<NetChatMessage>();
+        while (_chatQueue.TryDequeue(out NetChatMessage? message))
+        {
+            if (message is not null)
+            {
+                result.Add(message);
+            }
+        }
+
+        return result;
     }
 
     private async Task PingLoopAsync()
@@ -273,6 +300,14 @@ public sealed class NetworkClient : IDisposable
                         if (pong is not null && pong.ClientUtcTicks > 0)
                         {
                             _roundTripMs = Math.Max(0, (int)(TimeSpan.FromTicks(DateTime.UtcNow.Ticks - pong.ClientUtcTicks).TotalMilliseconds));
+                        }
+                    }
+                    else if (string.Equals(kind, "chat", StringComparison.OrdinalIgnoreCase))
+                    {
+                        NetChatMessage? chat = JsonSerializer.Deserialize<NetChatMessage>(line, _jsonOptions);
+                        if (chat is not null && !string.IsNullOrWhiteSpace(chat.Message))
+                        {
+                            _chatQueue.Enqueue(chat);
                         }
                     }
                 }

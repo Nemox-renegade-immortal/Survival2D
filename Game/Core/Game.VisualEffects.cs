@@ -357,6 +357,11 @@ public sealed partial class Game
 
     private void DrawImGuiWorldParticles(ImDrawListPtr draw)
     {
+        if (!_worldParticlesEnabled)
+        {
+            return;
+        }
+
         for (int i = 0; i < _worldParticles.Count; i++)
         {
             WorldParticle particle = _worldParticles[i];

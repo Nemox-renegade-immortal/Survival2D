@@ -189,11 +189,26 @@ public sealed class Window : Form
             Size size = new Size(_clientWidth, _clientHeight);
 
             Stopwatch updateWatch = Stopwatch.StartNew();
+            bool shouldExit;
             lock (_gameSync)
             {
                 _game.Update(dt, frameInput, size);
+                shouldExit = _game.ConsumeExitRequest();
             }
             updateWatch.Stop();
+
+            if (shouldExit)
+            {
+                _running = false;
+                try
+                {
+                    BeginInvoke((Action)(Close));
+                }
+                catch
+                {
+                }
+                break;
+            }
 
             _lastUpdateMs = (float)updateWatch.Elapsed.TotalMilliseconds;
             _lastFrameMs = dt * 1000f;

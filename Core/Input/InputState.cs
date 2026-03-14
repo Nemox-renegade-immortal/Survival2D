@@ -10,6 +10,7 @@ public sealed class InputState
     private readonly HashSet<Keys> _keysDown = new();
     private readonly HashSet<Keys> _keysPressed = new();
     private readonly HashSet<Keys> _keysReleased = new();
+    private readonly List<int> _textInputCodepoints = new();
     private Point _mouseScreen;
     private bool _leftMouseDown;
     private bool _leftMousePressed;
@@ -90,6 +91,17 @@ public sealed class InputState
         }
     }
 
+    public IReadOnlyList<int> TextInputCodepoints
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _textInputCodepoints.ToArray();
+            }
+        }
+    }
+
     public bool IsDown(Keys key)
     {
         lock (_sync)
@@ -129,6 +141,19 @@ public sealed class InputState
             {
                 _keysReleased.Add(key);
             }
+        }
+    }
+
+    public void AddTextInput(int unicode)
+    {
+        if (unicode <= 0)
+        {
+            return;
+        }
+
+        lock (_sync)
+        {
+            _textInputCodepoints.Add(unicode);
         }
     }
 
@@ -173,6 +198,7 @@ public sealed class InputState
             snapshot._keysDown.UnionWith(_keysDown);
             snapshot._keysPressed.UnionWith(_keysPressed);
             snapshot._keysReleased.UnionWith(_keysReleased);
+            snapshot._textInputCodepoints.AddRange(_textInputCodepoints);
             snapshot._mouseScreen = _mouseScreen;
             snapshot._leftMouseDown = _leftMouseDown;
             snapshot._leftMousePressed = _leftMousePressed;
@@ -191,6 +217,7 @@ public sealed class InputState
             snapshot._keysDown.UnionWith(_keysDown);
             snapshot._keysPressed.UnionWith(_keysPressed);
             snapshot._keysReleased.UnionWith(_keysReleased);
+            snapshot._textInputCodepoints.AddRange(_textInputCodepoints);
             snapshot._mouseScreen = _mouseScreen;
             snapshot._leftMouseDown = _leftMouseDown;
             snapshot._leftMousePressed = _leftMousePressed;
@@ -200,6 +227,7 @@ public sealed class InputState
 
             _keysPressed.Clear();
             _keysReleased.Clear();
+            _textInputCodepoints.Clear();
             _leftMousePressed = false;
             _rightMousePressed = false;
             _mouseWheelDelta = 0;
@@ -214,6 +242,7 @@ public sealed class InputState
         {
             _keysPressed.Clear();
             _keysReleased.Clear();
+            _textInputCodepoints.Clear();
             _leftMousePressed = false;
             _rightMousePressed = false;
             _mouseWheelDelta = 0;
